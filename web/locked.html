@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ligmax — Console locked</title>
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+    <link rel="stylesheet" href="/styles/tokens.css" />
+    <style>
+      body {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, var(--navy-900), var(--navy-800));
+        padding: 2rem;
+      }
+
+      .locked {
+        max-width: 34rem;
+        text-align: center;
+        color: #eaf1fd;
+      }
+
+      .locked img {
+        height: 3.4rem;
+        width: auto;
+        margin: 0 auto 1.8rem;
+        filter: brightness(0) invert(1) opacity(0.92);
+      }
+
+      .locked h1 {
+        color: #fff;
+        font-size: 1.5rem;
+      }
+
+      .locked p {
+        color: #9db8e8;
+        line-height: 1.7;
+      }
+
+      .locked code {
+        font-family: var(--font-mono);
+        font-size: 0.85em;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 0.15rem 0.4rem;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="locked">
+      <img src="/assets/ligmax-logo.svg" alt="Ligmax" />
+      <h1>This console needs a key</h1>
+      <p>
+        Read-only access is switched off on this server. Open the console with your
+        operator key appended — <code>?key=…</code> — and it will be moved into a
+        session cookie straight away.
+      </p>
+      <p><a href="https://ligmax.no" style="color: #7fb0ff">ligmax.no</a></p>
+    </div>
+  </body>
+</html>

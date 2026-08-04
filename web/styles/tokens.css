@@ -1,0 +1,307 @@
+/* ------------------------------------------------------------------ */
+/*  Ligmax live console — design tokens                                */
+/*                                                                     */
+/*  The brand palette, type scale, radii and shadows are the same ones */
+/*  ligmax.no uses, so the console reads as part of the same site.     */
+/*  Added here: instrument colours (obstacle types, state levels) and  */
+/*  a dark theme for the shell, because this thing gets stared at in   */
+/*  a workshop and on a boat.                                          */
+/* ------------------------------------------------------------------ */
+
+:root {
+  /* Brand palette (derived from the Ligmax wordmark #203a70) */
+  --navy-950: #0a1128;
+  --navy-900: #0e1834;
+  --navy-800: #16244c;
+  --brand: #203a70;
+  --brand-600: #2b4c92;
+  --brand-500: #3a62b4;
+  --blue: #4f7fce;
+  --blue-soft: #dbe6f6;
+
+  --ink: #101a34;
+  --body: #3d4a66;
+  --muted: #5d6a86;
+  --line: #e3e8f2;
+  --bg: #ffffff;
+  --bg-soft: #f5f7fb;
+  --bg-sunk: #eef2f9;
+
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-xs: 6px;
+  --shadow-sm: 0 1px 2px rgba(16, 26, 52, 0.05), 0 2px 10px rgba(16, 26, 52, 0.05);
+  --shadow-md: 0 2px 6px rgba(16, 26, 52, 0.06), 0 12px 32px rgba(16, 26, 52, 0.1);
+
+  --font: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'JetBrains Mono', Consolas, monospace;
+
+  /* State colours — used for thresholds, log levels and link health. */
+  --ok: #1c8b5a;
+  --ok-soft: #e3f5ec;
+  --warn: #b7791f;
+  --warn-soft: #fdf3e2;
+  --danger: #c62b32;
+  --danger-soft: #fdeaea;
+  --danger-strong: #9d1f25;
+  --info: var(--brand-500);
+  --debug: #7b8aa6;
+
+  /* Instrument surface — the navy panel the map and gauges sit on.
+     ligmax.no already uses this gradient for its media panels. */
+  --panel: linear-gradient(180deg, var(--navy-900), var(--navy-800));
+  --panel-line: rgba(255, 255, 255, 0.12);
+  --panel-ink: #eaf1fd;
+  --panel-muted: #9db8e8;
+
+  /* Obstacle types — mirrors ObstacleType in shared_settings.py.
+     Kept in CSS as well as JS so legends and chips stay in step. */
+  --ob-unknown: #8b98ae;
+  --ob-red: #e2453f;
+  --ob-green: #22a06b;
+  --ob-cardinal: #efc63d;
+  --ob-boat: #f08a24;
+  --ob-land: #a9764b;
+  --ob-dock: #9a6ce0;
+
+  --nogo: #e2453f;
+  --path: #56d0ff;
+  --path-alt: #6f8ab5;
+  --scan: #7fd4ff;
+  --boat: #ffffff;
+  --trail: #7fb0ff;
+}
+
+/* Dark shell. Toggled by [data-theme] on <html>, defaulting to the
+   viewer's OS preference. The instrument panels are navy either way. */
+:root[data-theme='dark'] {
+  --ink: #eef3fb;
+  --body: #bccbe4;
+  --muted: #8ba0c2;
+  --line: #21304f;
+  --bg: #0b1224;
+  --bg-soft: #0f1830;
+  --bg-sunk: #0a1020;
+  --blue-soft: #1b2a4d;
+
+  --brand: #3a62b4;
+  --brand-600: #5b86d6;
+  --brand-500: #7ba3e8;
+
+  --ok: #3fcb8b;
+  --ok-soft: #10301f;
+  --warn: #e0a63c;
+  --warn-soft: #302206;
+  --danger: #ff6b6b;
+  --danger-soft: #35131a;
+  --danger-strong: #ff8f8f;
+  --debug: #7c8db0;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 10px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.45), 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --ink: #eef3fb;
+    --body: #bccbe4;
+    --muted: #8ba0c2;
+    --line: #21304f;
+    --bg: #0b1224;
+    --bg-soft: #0f1830;
+    --bg-sunk: #0a1020;
+    --blue-soft: #1b2a4d;
+
+    --brand: #3a62b4;
+    --brand-600: #5b86d6;
+    --brand-500: #7ba3e8;
+
+    --ok: #3fcb8b;
+    --ok-soft: #10301f;
+    --warn: #e0a63c;
+    --warn-soft: #302206;
+    --danger: #ff6b6b;
+    --danger-soft: #35131a;
+    --danger-strong: #ff8f8f;
+    --debug: #7c8db0;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 10px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.45), 0 12px 32px rgba(0, 0, 0, 0.45);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Components below set `display: flex` / `inline-flex`, and an author-level
+   display declaration beats the user-agent's `[hidden] { display: none }`.
+   Without this, toggling `element.hidden` silently does nothing — which would
+   leave the operator command panel on screen in read-only mode. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--body);
+  background: var(--bg-soft);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+h1, h2, h3, h4 {
+  color: var(--ink);
+  line-height: 1.15;
+  letter-spacing: -0.022em;
+  margin: 0 0 0.6em;
+  font-weight: 700;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0 0 1em;
+}
+
+a {
+  color: var(--brand-600);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.container {
+  width: min(1720px, 100% - 2.5rem);
+  margin-inline: auto;
+}
+
+/* Section headers, same treatment as the marketing site ------------- */
+
+.eyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--brand-500);
+  margin-bottom: 0.35rem;
+}
+
+.eyebrow--danger {
+  color: var(--danger);
+}
+
+/* Buttons ------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.78rem 1.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.98rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease,
+    color 0.18s ease, transform 0.18s ease;
+}
+
+.btn:hover:not(:disabled) {
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--sm {
+  padding: 0.5rem 0.95rem;
+  font-size: 0.88rem;
+}
+
+.btn--primary {
+  background: var(--brand);
+  color: #fff;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--brand-600);
+}
+
+.btn--outline {
+  border-color: var(--line);
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.btn--outline:hover:not(:disabled) {
+  border-color: var(--brand-500);
+  color: var(--brand-600);
+}
+
+.btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-strong);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--brand);
+  color: #fff;
+  padding: 0.6rem 1rem;
+  border-radius: 0 0 var(--radius-sm) 0;
+  z-index: 100;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

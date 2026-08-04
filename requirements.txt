@@ -1,0 +1,10 @@
+# Ligmax GUI — ground-station dashboard
+#
+# Deliberately tiny: the server is Flask + stdlib only, and the frontend is
+# vanilla JS with no build step. That keeps the dashboard runnable on the
+# vessel's Raspberry Pi and on a laptop with no network access.
+Flask>=3.0
+python-dotenv>=1.0
+
+# Optional, only used by tools/sim_boat.py and the numpy-friendly client paths.
+numpy>=1.24
