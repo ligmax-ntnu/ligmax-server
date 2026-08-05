@@ -54,6 +54,10 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     "set_mode": {"label": "Set mode", "args": {"mode": "str"}},
     "estop": {"label": "Emergency stop", "args": {}, "danger": True},
     "estop_clear": {"label": "Clear emergency stop", "args": {}, "confirm": True},
+    # Re-homes the battery slider: the vessel pulses its homing line and the
+    # slider ESP32 hunts for the optical centre endstop. It stops holding pitch
+    # trim while it searches, so it asks first.
+    "home_battery": {"label": "Home battery rail", "args": {}, "confirm": True},
     "hold": {"label": "Hold position", "args": {}},
     "resume": {"label": "Resume mission", "args": {}},
     "arm": {"label": "Arm propulsion", "args": {}, "confirm": True},

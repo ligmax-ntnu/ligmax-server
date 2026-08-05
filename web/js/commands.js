@@ -16,6 +16,7 @@ const QUICK_COMMANDS = [
   { name: 'arm', label: 'Arm', variant: 'outline', confirm: 'Arm propulsion?' },
   { name: 'disarm', label: 'Disarm', variant: 'outline' },
   { name: 'estop_clear', label: 'Clear E-stop', variant: 'outline', confirm: 'Clear the emergency stop? Propulsion power will be restored.' },
+  { name: 'home_battery', label: 'Home battery', variant: 'outline', confirm: 'Re-home the battery rail? The slider hunts for its centre endstop and stops holding pitch trim until it finds it.' },
   { name: 'clear_waypoints', label: 'Clear route', variant: 'outline' },
 ];
 
