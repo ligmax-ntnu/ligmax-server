@@ -6,3 +6,6 @@ venv/
 *.log
 recordings/
 .DS_Store
+caddy.exe
+Caddyfile
+keys/
