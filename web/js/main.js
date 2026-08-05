@@ -2,6 +2,7 @@
 
 import { connectStream, fetchSession, logout, scrubUrl, takeNotice } from './api.js';
 import { CommandPanel, renderCommandHistory } from './commands.js';
+import { DeployPanel } from './deploy.js';
 import * as fmt from './format.js';
 import { LogConsole, downloadText } from './logs.js';
 import { WorldMap } from './map.js';
@@ -390,6 +391,12 @@ async function boot() {
       if (event.key === 'Escape' && commandPanel.pickingGoto) commandPanel.setGotoArmed(false);
     });
   }
+
+  /* The deploy panel is visible read-only too — knowing which SHA each node runs is
+     useful without command rights. Only the buttons are gated on admin. */
+  const deployPanel = new DeployPanel($('deploy-list'), { notify });
+  deployPanel.setAdmin(admin);
+  deployPanel.start();
 
   $('logout-btn').addEventListener('click', async () => {
     await logout();

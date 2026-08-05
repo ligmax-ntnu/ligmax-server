@@ -7,6 +7,8 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .deploy import DEFAULT_REPOS
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_ROOT = REPO_ROOT / "web"
 ENV_PATH = REPO_ROOT / ".env"
@@ -55,6 +57,11 @@ class Config:
     udp_port: int = 8771
     max_scan_points: int = 1500
     log_buffer: int = 4000
+    # Shared secret the update pollers on each node present. Defaults to boat_key so
+    # there is one fewer secret to manage; set LIGMAX_NODE_KEY to separate them.
+    node_key: str = ""
+    # Repos the dashboard offers an Update button for.
+    repos: tuple[str, ...] = DEFAULT_REPOS
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -101,10 +108,23 @@ def load_config() -> Config:
             "sessions will be invalidated every time the server restarts."
         )
 
+    node_key = os.environ.get("LIGMAX_NODE_KEY", "").strip() or boat_key
+    if not node_key:
+        warnings.append(
+            "Neither LIGMAX_NODE_KEY nor LIGMAX_BOAT_KEY is set: the deploy endpoints "
+            "are UNAUTHENTICATED, so anyone who can reach them could trigger a pull on "
+            "your nodes. Set one before exposing this server."
+        )
+
+    raw_repos = os.environ.get("LIGMAX_REPOS", "").strip()
+    repos = tuple(r.strip() for r in raw_repos.split(",") if r.strip()) or DEFAULT_REPOS
+
     return Config(
         admin_key=admin_key,
         boat_key=boat_key,
         cookie_secret=cookie_secret,
+        node_key=node_key,
+        repos=repos,
         session_hours=_env_int("LIGMAX_SESSION_HOURS", 12),
         public_read=_env_bool("LIGMAX_PUBLIC_READ", True),
         host=os.environ.get("LIGMAX_HOST", "0.0.0.0").strip() or "0.0.0.0",

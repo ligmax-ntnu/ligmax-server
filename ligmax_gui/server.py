@@ -7,6 +7,10 @@ Transports
     server -> boat    the reply to either of the above carries queued commands
     server -> browser GET /api/stream        (Server-Sent Events)
     browser -> server POST /api/command      (admin cookie required)
+
+    node  -> server   GET  /api/deploy/<repo>/pending   (node key; polled outbound)
+                      POST /api/deploy/<repo>/report
+    browser -> server POST /api/deploy/<repo>           (admin cookie required)
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from flask import (
 
 from . import auth, protocol
 from .config import Config, WEB_ROOT, load_config
+from .deploy import DeployRegistry
 from .state import Cursor, Store
 
 STREAM_TICK = 1 / 20  # how often an SSE stream checks for new data
@@ -103,6 +108,8 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
 
     limiter = _AttemptLimiter()
     stream_clients = threading.Semaphore(MAX_STREAM_CLIENTS)
+    deployments = DeployRegistry(config.repos)
+    app.config["LIGMAX_DEPLOY"] = deployments
 
     for warning in [*config.warnings, *protocol.check_shared_settings_sync()]:
         store.add_log("WARN", warning, name="gui.config")
@@ -126,6 +133,17 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         ):
             return True
         return auth.key_matches(request.args.get("key"), config.boat_key)
+
+    def node_authorised() -> bool:
+        """Same shape as boat_authorised(), but for the update pollers on each node."""
+        if not config.node_key:
+            return True  # unset key => open, warned about at startup
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer ") and auth.key_matches(
+            header[7:], config.node_key
+        ):
+            return True
+        return auth.key_matches(request.args.get("key"), config.node_key)
 
     def secure_cookies() -> bool:
         proto = request.headers.get("X-Forwarded-Proto", request.scheme)
@@ -335,6 +353,93 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             "gui.command",
         )
         return jsonify({"ok": True, "command": queued.to_ui()})
+
+    # -- deployments --------------------------------------------------------
+    #
+    # The operator presses a button here; the node that owns the repo notices on its
+    # own outbound poll and runs deploy/ligmax-update.sh. Nothing in this server ever
+    # connects to a node, so no node needs an inbound port.
+
+    @app.get("/api/deploy")
+    def deploy_state() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        payload = deployments.snapshot()
+        payload["admin"] = is_admin()
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/deploy/<repo>")
+    def deploy_request(repo: str) -> Response:
+        if not is_admin():
+            store.add_log(
+                "WARN", f"update refused, not an admin: {_client_ip()}", "gui.auth"
+            )
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        if not deployments.known(repo):
+            return jsonify({"error": f"unknown repo '{repo}'"}), 404  # type: ignore[return-value]
+
+        state = deployments.request(repo, issued_by=_client_ip())
+        store.add_log(
+            "INFO", f"update requested for {repo} [{_client_ip()}]", "gui.deploy"
+        )
+        return jsonify({"ok": True, "repo": state})
+
+    @app.post("/api/deploy/<repo>/cancel")
+    def deploy_cancel(repo: str) -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        if not deployments.known(repo):
+            return jsonify({"error": f"unknown repo '{repo}'"}), 404  # type: ignore[return-value]
+        state = deployments.cancel(repo)
+        store.add_log(
+            "INFO", f"update request for {repo} cancelled [{_client_ip()}]", "gui.deploy"
+        )
+        return jsonify({"ok": True, "repo": state})
+
+    @app.get("/api/deploy/<repo>/pending")
+    def deploy_pending(repo: str) -> Response:
+        if not node_authorised():
+            return jsonify({"error": "node key required"}), 403  # type: ignore[return-value]
+        if not deployments.known(repo):
+            return jsonify({"error": f"unknown repo '{repo}'"}), 404  # type: ignore[return-value]
+        response = jsonify(deployments.pending(repo))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/deploy/<repo>/report")
+    def deploy_report(repo: str) -> Response:
+        if not node_authorised():
+            return jsonify({"error": "node key required"}), 403  # type: ignore[return-value]
+        if not deployments.known(repo):
+            return jsonify({"error": f"unknown repo '{repo}'"}), 404  # type: ignore[return-value]
+
+        payload = request.get_json(silent=True) or {}
+        result = str(payload.get("result", "")).strip()
+        message = str(payload.get("message", ""))
+        head = payload.get("head")
+        nonce = payload.get("nonce")
+
+        accepted, why = deployments.report(
+            repo,
+            nonce=str(nonce) if nonce else None,
+            result=result,
+            message=message,
+            head=str(head) if head else None,
+        )
+        if not accepted:
+            return jsonify({"error": why}), 400  # type: ignore[return-value]
+
+        level = "ERROR" if result == "failed" else "WARN" if result == "refused" else "INFO"
+        detail = f" - {message}" if message else ""
+        store.add_log(
+            level,
+            f"{repo} update {result}{detail}"
+            + (f" @ {str(head)[:8]}" if head else ""),
+            "gui.deploy",
+        )
+        return jsonify({"ok": True})
 
     # -- static -------------------------------------------------------------
 

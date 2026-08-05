@@ -30,6 +30,39 @@ export async function logout() {
   await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
 }
 
+/* --- deployments ------------------------------------------------------ */
+
+export async function fetchDeployState() {
+  const response = await fetch('/api/deploy', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`deploy state failed: ${response.status}`);
+  return response.json();
+}
+
+/** Ask the node that owns `repo` to pull. It acts on its next outbound poll. */
+export async function requestDeploy(repo) {
+  const response = await fetch(`/api/deploy/${encodeURIComponent(repo)}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `update request failed (${response.status})`);
+  }
+  return payload;
+}
+
+export async function cancelDeploy(repo) {
+  const response = await fetch(`/api/deploy/${encodeURIComponent(repo)}/cancel`, {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `cancel failed (${response.status})`);
+  }
+  return payload;
+}
+
 /**
  * Open the telemetry stream. Returns a handle with `.close()`.
  * `handlers` keys map to SSE event names, plus `onOpen` / `onError`.

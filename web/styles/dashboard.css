@@ -779,6 +779,126 @@
   margin: 0.5rem 0;
 }
 
+/* --- deploy panel ---------------------------------------------------- */
+
+.deploy-list {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0 1rem 0.25rem;
+}
+
+/* Two columns by default, status on its own line. This card always lives in a
+   ~360px sidebar, so a viewport media query would never fire for it. */
+.deploy-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+}
+
+.deploy-row[data-pending='true'] {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+/* Explicit placement: name left and the button right on row 1, status spanning
+   row 2. Auto-placement drops the button onto a third row and wastes the height. */
+.deploy-name {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.deploy-repo {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Node liveness. A repo whose node never polls can still be queued, so this has to
+   be visible before someone presses the button and waits for nothing. */
+.deploy-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--muted);
+}
+
+.deploy-dot[data-state='online'] { background: var(--ok); }
+.deploy-dot[data-state='offline'] { background: var(--muted); opacity: 0.55; }
+
+.deploy-status {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.45rem;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.deploy-status:empty { display: none; }
+
+.deploy-tag {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+  background: var(--bg-sunk);
+  color: var(--muted);
+}
+
+.deploy-tag[data-level='ok'] { background: var(--ok-soft); color: var(--ok); }
+.deploy-tag[data-level='warn'] { background: var(--warn-soft); color: var(--warn); }
+.deploy-tag[data-level='danger'] { background: var(--danger-soft); color: var(--danger); }
+
+.deploy-head {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--ink);
+  background: var(--bg-sunk);
+  border-radius: var(--radius-xs);
+  padding: 0.05rem 0.3rem;
+}
+
+.deploy-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deploy-when {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.deploy-actions {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  display: flex;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
 /* --- telemetry panels ----------------------------------------------- */
 
 .panel + .panel { margin-top: 1rem; }
