@@ -16,7 +16,10 @@ Transports
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -33,9 +36,11 @@ from flask import (
 )
 
 from . import auth, protocol
-from .config import Config, WEB_ROOT, load_config
+from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import DeployRegistry
 from .state import Cursor, Store
+
+SELF_REPO = "ligmax-server"  # the one repo we update by restarting ourselves
 
 STREAM_TICK = 1 / 20  # how often an SSE stream checks for new data
 STREAM_HEARTBEAT = 15.0  # comment frame keeps proxies from closing the stream
@@ -379,6 +384,24 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
         if not deployments.known(repo):
             return jsonify({"error": f"unknown repo '{repo}'"}), 404  # type: ignore[return-value]
+
+        # This repo is us. Nothing polls on our behalf, so do it directly: hand
+        # off to update.py, which waits for our port to free up, pulls, and
+        # starts us again. Everything is RAM-only, so there is nothing to flush.
+        if repo == SELF_REPO:
+            store.add_log(
+                "WARN", f"self-update: restarting [{_client_ip()}]", "gui.deploy"
+            )
+            subprocess.Popen(
+                [sys.executable, "update.py"],
+                cwd=str(REPO_ROOT),
+                creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+            )
+            # Exit from a thread so this response reaches the browser first.
+            threading.Thread(
+                target=lambda: (time.sleep(1), os._exit(0)), daemon=True
+            ).start()
+            return jsonify({"ok": True, "restarting": True})
 
         state = deployments.request(repo, issued_by=_client_ip())
         store.add_log(
