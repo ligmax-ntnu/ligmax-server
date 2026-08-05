@@ -519,13 +519,25 @@ const KPIS = [
 ];
 
 export class KpiStrip {
-  constructor(container, store) {
+  /**
+   * `keys` picks a subset, in the order given — the overview page shows the four
+   * figures a visitor can read without knowing the boat, the control page shows
+   * the lot. `overrides` replaces fields of a tile spec (`label`, `sub`, …) so the
+   * same tile can be plain-spoken in one place and precise in the other.
+   */
+  constructor(container, store, { keys = null, overrides = {} } = {}) {
     this.container = container;
     this.store = store;
     this.views = new Map();
     this.lastSparkAt = 0;
 
-    for (const kpi of KPIS) {
+    const byKey = new Map(KPIS.map((kpi) => [kpi.key, kpi]));
+    const chosen = keys
+      ? keys.map((key) => byKey.get(key)).filter(Boolean)
+      : KPIS;
+
+    for (const base of chosen) {
+      const kpi = { ...base, ...(overrides[base.key] ?? {}) };
       const root = element('div', 'kpi');
       root.append(element('span', 'kpi-label', kpi.label));
       const valueNode = element('span', 'kpi-value');

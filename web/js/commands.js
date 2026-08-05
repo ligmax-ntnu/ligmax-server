@@ -21,10 +21,18 @@ const QUICK_COMMANDS = [
 ];
 
 export class CommandPanel {
-  constructor(elements, store, { notify }) {
+  /**
+   * `canSend` false renders the whole panel disabled rather than hiding it, so a
+   * read-only viewer can see what an operator would be able to do — which is the
+   * point of the control page — without being able to do any of it. The server
+   * refuses these commands without an admin cookie regardless; this is only so
+   * the UI does not offer something that will bounce.
+   */
+  constructor(elements, store, { notify, canSend = true }) {
     this.elements = elements;
     this.store = store;
     this.notify = notify;
+    this.canSend = canSend;
     this.pickingGoto = false;
     this.onGotoArmed = null;
 
@@ -34,9 +42,14 @@ export class CommandPanel {
     this._bindSpeed();
     this._bindGoto();
     this._bindRaw();
+    if (!canSend) this._lockDown();
   }
 
   async _send(name, args = {}) {
+    if (!this.canSend) {
+      this.notify('Read-only session. Open the console with ?key=… to send commands.', 'warn');
+      return false;
+    }
     try {
       await sendCommand(name, args);
       return true;
@@ -46,8 +59,28 @@ export class CommandPanel {
     }
   }
 
+  /** Disable every control in the panel and say why once. */
+  _lockDown() {
+    const { estopButton } = this.elements;
+    for (const element of Object.values(this.elements)) {
+      if (!element) continue;
+      for (const node of element.querySelectorAll?.('button, input, select, textarea') ?? []) {
+        node.disabled = true;
+      }
+      if (element.tagName && /^(BUTTON|INPUT|SELECT|TEXTAREA)$/.test(element.tagName)) {
+        element.disabled = true;
+      }
+    }
+    if (estopButton) {
+      estopButton.setAttribute('aria-disabled', 'true');
+      const hint = estopButton.querySelector('.estop-btn-hint');
+      if (hint) hint.textContent = 'Operator key required';
+    }
+  }
+
   _buildQuickCommands() {
     const container = this.elements.quickCommands;
+    if (!container) return;
     const available = this.store.session.commands ?? {};
     for (const spec of QUICK_COMMANDS) {
       if (!available[spec.name]) continue; // server does not offer it
@@ -55,6 +88,7 @@ export class CommandPanel {
       button.type = 'button';
       button.className = `btn btn--${spec.variant}`;
       button.textContent = spec.label;
+      button.disabled = !this.canSend;
       button.addEventListener('click', () => {
         if (spec.confirm && !window.confirm(spec.confirm)) return;
         this._send(spec.name);
@@ -161,7 +195,9 @@ export class CommandPanel {
     });
   }
 
-  /** Keep the mode dropdown in step with what the vessel says it supports. */
+  /** Keep the mode dropdown in step with what the vessel says it supports.
+   *  A page may carry only the E-stop and no mode picker, so everything here is
+   *  optional. */
   syncModes() {
     const select = this.elements.modeSelect;
     if (!select) return;
@@ -185,8 +221,14 @@ export class CommandPanel {
       }
       if (current && modes.includes(current)) select.value = current;
     }
-    select.disabled = modes.length === 0;
-    this.elements.modeApply.disabled = modes.length === 0;
+    // A read-only viewer still gets to see which modes the vessel offers; it just
+    // stays disabled. Note the `!this.canSend` — without it this line would undo
+    // `_lockDown()` every time a frame arrived.
+    const usable = this.canSend && modes.length > 0;
+    select.disabled = !usable;
+    if (this.elements.modeApply) {
+      this.elements.modeApply.disabled = !usable;
+    }
   }
 }
 

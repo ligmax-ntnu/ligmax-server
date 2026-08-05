@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Ligmax — Live Vessel Console</title>
-    <meta name="description" content="Live telemetry, world model and debug console for the Ligmax autonomous vessel, Njord 2026." />
+    <title>Ligmax — Live Vessel</title>
+    <meta name="description" content="Live position and status of the Ligmax autonomous vessel, Njord 2026." />
     <meta name="robots" content="noindex, nofollow" />
     <meta name="theme-color" content="#0e1834" />
     <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
@@ -12,13 +12,13 @@
     <link rel="stylesheet" href="/styles/dashboard.css" />
   </head>
   <body>
-    <a class="skip-link" href="#map">Skip to world model</a>
+    <a class="skip-link" href="#map">Skip to the map</a>
 
     <header class="site-header">
       <div class="header-inner">
-        <a href="/" class="brand" aria-label="Ligmax live console">
+        <a href="/" class="brand" aria-label="Ligmax live vessel">
           <img src="/assets/ligmax-logo.svg" alt="Ligmax" width="132" height="65" />
-          <span class="brand-tag">Live console</span>
+          <span class="brand-tag">Live</span>
         </a>
 
         <div class="header-live" role="status" aria-live="polite">
@@ -30,6 +30,10 @@
         </div>
 
         <div class="header-actions">
+          <nav class="page-nav" aria-label="Views">
+            <a class="page-nav-link" href="/" data-nav>Overview</a>
+            <a class="page-nav-link" href="/control" data-nav>Control &amp; data</a>
+          </nav>
           <span class="role-badge" id="role-badge" data-role="read">Read-only</span>
           <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -43,22 +47,22 @@
 
     <div class="estop-banner" id="estop-banner" role="alert" hidden>
       <strong>Emergency stop engaged</strong>
-      <span>Propulsion power is cut at the safety loop. Clear the stop on the vessel or from the command panel before the mission can resume.</span>
+      <span>Propulsion power is cut at the safety loop. It has to be cleared before the boat can move again.</span>
     </div>
 
     <div class="notice-stack" id="notice-stack" aria-live="polite"></div>
 
     <main class="dash">
       <div class="container">
-        <section class="kpi-strip" id="kpi-strip" aria-label="Key vessel figures"></section>
+        <section class="kpi-strip kpi-strip--basic" id="kpi-strip" aria-label="What the boat is doing"></section>
 
-        <div class="dash-grid">
+        <div class="overview-grid">
           <!-- ---------------------------------------------------------- map -->
           <section class="card card--map">
             <header class="card-head">
               <div>
-                <span class="eyebrow">World model</span>
-                <h2 class="card-title">Local grid, metres from origin</h2>
+                <span class="eyebrow">Where it is</span>
+                <h2 class="card-title">The boat and what it can see</h2>
               </div>
               <div class="map-tools">
                 <label class="field field--inline">
@@ -81,135 +85,68 @@
             </header>
 
             <div class="map-wrap" id="map-wrap">
-              <canvas id="map" tabindex="0" aria-label="Vessel world model: obstacles, no-go zones and planned path"></canvas>
+              <canvas id="map" tabindex="0" aria-label="The vessel, the buoys it has detected, and the route it is following"></canvas>
               <div class="map-legend" id="map-legend" aria-hidden="true"></div>
               <div class="map-readout" id="map-readout"><span id="readout-coords">—</span><span id="readout-scale"></span></div>
               <div class="map-attrib" id="map-attrib"></div>
               <div class="map-tooltip" id="map-tooltip" hidden></div>
-              <div class="map-empty" id="map-empty">Waiting for the first telemetry frame…</div>
+              <div class="map-empty" id="map-empty">Waiting for the boat to report in…</div>
             </div>
-
-            <footer class="card-foot layer-bar" id="layer-bar" aria-label="Map layers"></footer>
           </section>
 
           <!-- ------------------------------------------------------- side -->
-          <aside class="dash-side">
-            <section class="card card--command" id="command-card" hidden>
+          <aside class="overview-side">
+            <!-- Admins get the stop button here; everyone else sees nothing at
+                 all, so the overview stays a place you cannot break anything. -->
+            <section class="card card--command" id="estop-card" hidden>
               <header class="card-head card-head--tight">
                 <div>
-                  <span class="eyebrow eyebrow--danger">Read / write</span>
-                  <h2 class="card-title">Vessel commands</h2>
+                  <span class="eyebrow eyebrow--danger">Operator</span>
+                  <h2 class="card-title">Stop the boat</h2>
                 </div>
               </header>
-
               <div class="command-body">
                 <button class="estop-btn" id="estop-btn" type="button">
                   <span class="estop-btn-label">Emergency stop</span>
                   <span class="estop-btn-hint">Hold to fire</span>
                   <span class="estop-btn-fill" aria-hidden="true"></span>
                 </button>
-
-                <div class="command-row">
-                  <label class="field">
-                    <span class="field-label">Mode</span>
-                    <select id="mode-select" class="select"></select>
-                  </label>
-                  <button class="btn btn--primary btn--sm" id="mode-apply" type="button">Set</button>
-                </div>
-
-                <div class="command-grid" id="quick-commands"></div>
-
-                <div class="command-row">
-                  <label class="field">
-                    <span class="field-label">Speed limit (m/s)</span>
-                    <input class="input" id="speed-limit" type="number" min="0.2" max="8" step="0.1" value="3.0" />
-                  </label>
-                  <button class="btn btn--outline btn--sm" id="speed-apply" type="button">Apply</button>
-                </div>
-
+                <!-- Go-to lives here rather than on the control page because it is
+                     a map interaction: you pick the point by clicking the chart,
+                     and the chart is only on this page. -->
                 <button class="chip chip--toggle chip--wide" id="goto-arm" type="button" aria-pressed="false">
                   Pick a go-to point on the map
                 </button>
-
-                <details class="raw-command">
-                  <summary>Raw command</summary>
-                  <textarea id="raw-payload" class="input input--mono" rows="3" spellcheck="false" placeholder='{"any": "json"}'></textarea>
-                  <button class="btn btn--outline btn--sm" id="raw-send" type="button">Send raw</button>
-                </details>
+                <p class="card-note card-note--tight">
+                  The stop cuts propulsion power at the safety loop. Modes, arming,
+                  trim and the logs are on the <a href="/control">control page</a>.
+                </p>
               </div>
             </section>
 
-            <section class="card card--locked" id="readonly-card">
-              <span class="eyebrow">Access</span>
-              <h2 class="card-title">Read-only view</h2>
+            <section class="card card--plain" id="explainer-card">
+              <span class="eyebrow">What you are looking at</span>
+              <h2 class="card-title">Ligmax, sailing itself</h2>
+              <p class="card-note" id="explainer-text">
+                The blue shape is the boat. Coloured circles are buoys and obstacles it
+                has spotted with its cameras, and the line ahead is the route it has
+                chosen. Everything updates live, several times a second.
+              </p>
+              <dl class="plain-facts" id="plain-facts"></dl>
+            </section>
+
+            <section class="card card--plain">
+              <span class="eyebrow">More</span>
+              <h2 class="card-title">Full instrumentation</h2>
               <p class="card-note">
-                You are watching live telemetry. Sending commands to the vessel needs an
-                operator key — open the console once with <code>?key=…</code> appended and the
-                key is moved into a session cookie.
+                Every measurement, the log stream and the operator controls are on the
+                <a href="/control">control &amp; data page</a>.
               </p>
             </section>
-
-            <section class="card card--deploy" id="deploy-card">
-              <header class="card-head card-head--tight">
-                <div>
-                  <span class="eyebrow">Software</span>
-                  <h2 class="card-title">Update from GitHub</h2>
-                </div>
-              </header>
-              <div class="deploy-list" id="deploy-list"></div>
-              <p class="card-note card-note--tight">
-                Each node polls for its own request and fast-forwards only. A machine with
-                uncommitted changes refuses the update rather than discarding them.
-              </p>
-            </section>
-
-            <div id="telemetry-panels"></div>
           </aside>
         </div>
 
-        <!-- ------------------------------------------------------- lower -->
-        <div class="dash-grid dash-grid--lower">
-          <section class="card card--logs">
-            <header class="card-head">
-              <div>
-                <span class="eyebrow">Debug stream</span>
-                <h2 class="card-title">Vessel log, cleartext</h2>
-              </div>
-              <div class="log-tools">
-                <div class="level-chips" id="level-chips" role="group" aria-label="Log levels"></div>
-                <label class="field field--inline">
-                  <span class="sr-only">Filter log lines</span>
-                  <input class="input input--sm" id="log-filter" type="search" placeholder="Filter text or logger…" />
-                </label>
-                <button class="chip chip--toggle" id="log-pause" type="button" aria-pressed="false" title="Freeze the stream">Pause</button>
-                <button class="chip" id="log-copy" type="button" title="Copy visible lines">Copy</button>
-                <button class="chip" id="log-download" type="button" title="Download visible lines">Save</button>
-                <button class="chip" id="log-clear" type="button" title="Clear this view">Clear</button>
-              </div>
-            </header>
-            <div class="log-view" id="log-view" role="log" aria-live="off"></div>
-            <footer class="card-foot log-foot">
-              <span id="log-count">0 lines</span>
-              <span id="log-status"></span>
-            </footer>
-          </section>
-
-          <section class="card card--cmdlog">
-            <header class="card-head">
-              <div>
-                <span class="eyebrow">Audit</span>
-                <h2 class="card-title">Command history</h2>
-              </div>
-            </header>
-            <ol class="cmd-list" id="cmd-list"></ol>
-            <footer class="card-foot">
-              <span class="card-note card-note--tight">
-                Every command is logged with its source address, and acknowledged by the
-                vessel once acted on.
-              </span>
-            </footer>
-          </section>
-        </div>
+        <footer class="card-foot layer-bar" id="layer-bar" aria-label="Map layers"></footer>
       </div>
     </main>
 

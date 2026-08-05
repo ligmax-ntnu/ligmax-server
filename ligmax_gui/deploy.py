@@ -39,7 +39,16 @@ from typing import Any
 REQUEST_TTL = 30 * 60.0
 
 # How long after its last poll a node is still considered to be listening.
+# Each node's own update.py polls every 30 s (`POLL = 30`), so 180 s is six missed
+# polls - long enough not to flicker, short enough to notice a dead node quickly.
+# Keep this above whatever POLL the nodes use.
 NODE_STALE_AFTER = 180.0
+
+# Repos that update themselves and therefore never poll. `ligmax-server` is the
+# dashboard you are reading: server.py handles its Update button in-process by
+# handing off to update.py, so nothing ever calls /pending on its behalf and the
+# row would otherwise sit at "has not checked in" for ever, wrongly.
+SELF_UPDATING = ("ligmax-server",)
 
 DEFAULT_REPOS = (
     "ligmax-server",
@@ -69,6 +78,7 @@ class RepoState:
 
     def to_ui(self, now: float) -> dict[str, Any]:
         pending = self.nonce is not None
+        self_updating = self.name in SELF_UPDATING
         return {
             "name": self.name,
             "pending": pending,
@@ -76,8 +86,13 @@ class RepoState:
             "requested_by": self.requested_by,
             "waiting_for": (now - self.requested_at) if pending and self.requested_at else None,
             "last_poll": self.last_poll,
-            "node_online": self.last_poll is not None
-            and (now - self.last_poll) < NODE_STALE_AFTER,
+            # A self-updating repo has no poller, so "online" would always be false.
+            # Report it as online instead of implying something is broken.
+            "self_updating": self_updating,
+            "node_online": self_updating
+            or (
+                self.last_poll is not None and (now - self.last_poll) < NODE_STALE_AFTER
+            ),
             "last_result": self.last_result,
             "last_message": self.last_message,
             "last_finished": self.last_finished,

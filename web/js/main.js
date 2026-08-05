@@ -1,18 +1,55 @@
-/* Boots the console and wires the pieces together. */
+/* The overview page: the map, four figures, and nothing you can break.
+ *
+ * The audience is someone who has never seen this boat — a judge, a sponsor, a
+ * visitor. So this page carries only what such a person can read without being
+ * told: where the boat is, what it has spotted, how fast it is going, how much
+ * battery is left. Everything that needs context to interpret — every telemetry
+ * field, the mode picker, arm/disarm, the log stream, the command audit, the repo
+ * list — is on /control (see control.js).
+ *
+ * Admins additionally get the emergency stop and the go-to picker here, because
+ * both belong next to the map: one is the thing you reach for in a hurry, the
+ * other is a click on the chart.
+ */
 
-import { connectStream, fetchSession, logout, scrubUrl, takeNotice } from './api.js';
-import { CommandPanel, renderCommandHistory } from './commands.js';
-import { DeployPanel } from './deploy.js';
+import { CommandPanel } from './commands.js';
 import * as fmt from './format.js';
-import { LogConsole, downloadText } from './logs.js';
 import { WorldMap } from './map.js';
-import { legendFor, setTypeTable, styleOf } from './obstacles.js';
+import { legendFor, styleOf } from './obstacles.js';
 import { wrongSideDirection } from './nogo.js';
-import { Store } from './store.js';
-import { KpiStrip, TelemetryPanels } from './telemetry.js';
+import {
+  $,
+  bootShell,
+  connectShellStream,
+  notify,
+  savePrefs,
+  startHeartbeat,
+  updateHeader,
+} from './shell.js';
+import { KpiStrip } from './telemetry.js';
 
-const $ = (id) => document.getElementById(id);
-const PREFS_KEY = 'ligmax.console.prefs';
+/* The four figures a visitor can read unaided, in plain words. The precise
+   versions of these — and the other five tiles — are on the control page. */
+const BASIC_KPIS = ['mode', 'speed', 'battery', 'detections'];
+
+const BASIC_LABELS = {
+  mode: {
+    label: 'Doing',
+    sub: (store) =>
+      store.state.estop
+        ? 'stopped by the operator'
+        : store.state.status_text ?? (store.state.mode ? 'under way' : 'waiting for the boat'),
+  },
+  speed: { label: 'Speed' },
+  battery: { label: 'Battery' },
+  detections: {
+    label: 'Obstacles seen',
+    sub: (store) =>
+      (store.state.tracks?.length ?? 0) === 0
+        ? 'nothing in view'
+        : 'buoys and hazards the cameras found',
+  },
+};
 
 const LAYER_CHIPS = [
   { key: 'grid', label: 'Metre grid' },
@@ -24,89 +61,6 @@ const LAYER_CHIPS = [
   { key: 'labels', label: 'Track IDs' },
   { key: 'ids', label: 'Type names' },
 ];
-
-/* --- preferences ----------------------------------------------------- */
-
-function loadPrefs() {
-  try {
-    return JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}');
-  } catch {
-    return {};
-  }
-}
-
-function savePrefs(prefs) {
-  try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-  } catch {
-    /* private browsing, nothing to do */
-  }
-}
-
-/* --- notices --------------------------------------------------------- */
-
-function notify(message, level = 'info', timeout = 6000) {
-  const stack = $('notice-stack');
-  const notice = document.createElement('div');
-  notice.className = 'notice';
-  notice.dataset.level = level;
-  notice.textContent = message;
-  stack.append(notice);
-  window.setTimeout(() => notice.remove(), timeout);
-}
-
-/* --- theme ----------------------------------------------------------- */
-
-function applyTheme(theme) {
-  if (theme === 'light' || theme === 'dark') {
-    document.documentElement.dataset.theme = theme;
-  } else {
-    delete document.documentElement.dataset.theme;
-  }
-}
-
-/* --- header ---------------------------------------------------------- */
-
-function updateHeader(store) {
-  const level = store.linkLevel;
-  const pill = $('link-pill');
-  pill.dataset.state = level;
-
-  const hz = store.stats?.hz;
-  const age = store.stats?.last_frame_age;
-  const transport = store.stats?.transport;
-  let text;
-  if (store.streamState !== 'open') {
-    text = store.streamState === 'retrying' ? 'Reconnecting…' : 'Connecting…';
-  } else if (!store.stats?.last_frame_at) {
-    text = 'No vessel yet';
-  } else if (level === 'live') {
-    text = `Live · ${fmt.fixed(hz, 1)} Hz${transport ? ` · ${transport}` : ''}`;
-  } else if (level === 'stale') {
-    text = `Stale · ${fmt.fixed(age, 1)} s`;
-  } else {
-    text = `Signal lost · ${fmt.ago(age)}`;
-  }
-  $('link-text').textContent = text;
-
-  $('mode-pill').textContent = store.state.mode ?? 'no mode';
-
-  const armed = store.telemetry('autonomy.armed');
-  const armedPill = $('armed-pill');
-  armedPill.hidden = armed !== false;
-
-  const estop = Boolean(store.state.estop);
-  $('estop-banner').hidden = !estop;
-
-  const peer = store.stats?.peer;
-  $('footer-link-meta').textContent = [
-    store.stats?.frames ? `${store.stats.frames.toLocaleString('en-GB')} frames` : null,
-    store.stats?.seq_gaps ? `${store.stats.seq_gaps} dropped` : null,
-    peer ? `from ${peer}` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-}
 
 /* --- legend ---------------------------------------------------------- */
 
@@ -137,6 +91,43 @@ function updateLegend(store) {
     count.textContent = entry.count;
     row.append(swatch, label, count);
     container.append(row);
+  }
+}
+
+/* --- plain-language facts -------------------------------------------- */
+
+/** A handful of rows in words rather than units. Skips whatever is unknown. */
+function updatePlainFacts(store) {
+  const list = $('plain-facts');
+  if (!list) return;
+
+  const rows = [];
+
+  const lat = store.telemetry('gps.lat') ?? store.state.origin?.lat;
+  const lon = store.telemetry('gps.lon') ?? store.state.origin?.lon;
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    rows.push(['Position', `${lat.toFixed(5)}, ${lon.toFixed(5)}`]);
+  }
+
+  const uptime = store.telemetry('system.uptime_s');
+  if (Number.isFinite(uptime)) rows.push(['Running for', fmt.duration(uptime)]);
+
+  const age = store.stats?.last_frame_age;
+  if (Number.isFinite(age)) {
+    rows.push(['Last update', age < 2 ? 'just now' : fmt.ago(age)]);
+  }
+
+  const signature = rows.map((row) => row.join('=')).join('|');
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
+
+  list.replaceChildren();
+  for (const [key, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = key;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    list.append(dt, dd);
   }
 }
 
@@ -210,45 +201,13 @@ function renderTooltip(store, hover) {
 /* --- boot ------------------------------------------------------------ */
 
 async function boot() {
-  scrubUrl();
+  const { store, admin, prefs } = await bootShell();
 
-  const notice = takeNotice();
-  if (notice === 'granted') notify('Operator session started. You can send commands.', 'ok');
-  else if (notice === 'denied') notify('That key was not accepted. Still read-only.', 'error');
-  else if (notice === 'throttled') {
-    notify('Too many failed key attempts from this address. Try again later.', 'error');
-  }
-
-  const prefs = loadPrefs();
-  applyTheme(prefs.theme);
-
-  const store = new Store();
-
-  let session;
-  try {
-    session = await fetchSession();
-  } catch (error) {
-    notify(`Could not reach the server: ${error.message}`, 'error', 20000);
-    session = { admin: false, admin_possible: false, commands: {}, obstacle_types: {}, wrong_side_length: 20 };
-  }
-  store.session = session;
-  setTypeTable(session.obstacle_types);
-
-  const admin = Boolean(session.admin);
-  $('role-badge').dataset.role = admin ? 'admin' : 'read';
-  $('role-badge').textContent = admin ? 'Read / write' : 'Read-only';
-  $('command-card').hidden = !admin;
-  $('readonly-card').hidden = admin;
-  $('logout-btn').hidden = !admin;
-  if (!session.shared_settings) {
-    notify(
-      'Server could not import shared_settings.py — obstacle names come from the built-in mirror.',
-      'warn',
-      12000
-    );
-  }
+  $('estop-card').hidden = !admin;
 
   /* --- map ---------------------------------------------------------- */
+
+  let commandPanel = null;
 
   const map = new WorldMap({
     canvas: $('map'),
@@ -335,52 +294,20 @@ async function boot() {
 
   map.start();
 
-  /* --- panels ------------------------------------------------------- */
+  /* --- figures ------------------------------------------------------ */
 
-  const kpiStrip = new KpiStrip($('kpi-strip'), store);
-  const telemetryPanels = new TelemetryPanels($('telemetry-panels'), store);
-
-  const logConsole = new LogConsole(
-    {
-      view: $('log-view'),
-      chips: $('level-chips'),
-      filterInput: $('log-filter'),
-      pauseButton: $('log-pause'),
-      countLabel: $('log-count'),
-      statusLabel: $('log-status'),
-    },
-    store
-  );
-
-  $('log-clear').addEventListener('click', () => logConsole.clear());
-  $('log-copy').addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(logConsole.visibleText());
-      notify('Visible log lines copied.', 'ok', 3000);
-    } catch {
-      notify('Clipboard access was refused by the browser.', 'warn');
-    }
-  });
-  $('log-download').addEventListener('click', () => {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    downloadText(`ligmax-log-${stamp}.txt`, logConsole.visibleText());
+  const kpiStrip = new KpiStrip($('kpi-strip'), store, {
+    keys: BASIC_KPIS,
+    overrides: BASIC_LABELS,
   });
 
-  /* --- commands ----------------------------------------------------- */
+  /* --- operator controls (admin only) ------------------------------- */
 
-  let commandPanel = null;
   if (admin) {
     commandPanel = new CommandPanel(
       {
         estopButton: $('estop-btn'),
-        modeSelect: $('mode-select'),
-        modeApply: $('mode-apply'),
-        speedLimit: $('speed-limit'),
-        speedApply: $('speed-apply'),
         gotoArm: $('goto-arm'),
-        rawPayload: $('raw-payload'),
-        rawSend: $('raw-send'),
-        quickCommands: $('quick-commands'),
       },
       store,
       { notify }
@@ -391,27 +318,6 @@ async function boot() {
       if (event.key === 'Escape' && commandPanel.pickingGoto) commandPanel.setGotoArmed(false);
     });
   }
-
-  /* The deploy panel is visible read-only too — knowing which SHA each node runs is
-     useful without command rights. Only the buttons are gated on admin. */
-  const deployPanel = new DeployPanel($('deploy-list'), { notify });
-  deployPanel.setAdmin(admin);
-  deployPanel.start();
-
-  $('logout-btn').addEventListener('click', async () => {
-    await logout();
-    window.location.reload();
-  });
-
-  $('theme-toggle').addEventListener('click', () => {
-    const current =
-      document.documentElement.dataset.theme ??
-      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    const next = current === 'dark' ? 'light' : 'dark';
-    applyTheme(next);
-    prefs.theme = next;
-    savePrefs(prefs);
-  });
 
   /* --- store -> ui -------------------------------------------------- */
 
@@ -425,8 +331,7 @@ async function boot() {
     map.onState();
     updateLegend(store);
     kpiStrip.update();
-    telemetryPanels.update();
-    commandPanel?.syncModes();
+    updatePlainFacts(store);
     updateHeader(store);
   });
 
@@ -435,44 +340,18 @@ async function boot() {
     updateHeader(store);
     map.invalidate();
   });
-  store.on('logs', (entries) => logConsole.append(entries));
-  store.on('snapshot', () => {
-    logConsole.rebuild();
-    renderCommandHistory($('cmd-list'), store.commands);
-  });
-  store.on('commands', (commands) => renderCommandHistory($('cmd-list'), commands));
 
-  renderCommandHistory($('cmd-list'), []);
+  connectShellStream(store);
 
-  /* --- stream ------------------------------------------------------- */
+  window.ligmax = { store, map, kpiStrip, commandPanel };
 
-  connectStream({
-    onOpen: () => store.setStreamState('open'),
-    onError: () => store.setStreamState('retrying'),
-    hello: () => store.setStreamState('open'),
-    snapshot: (payload) => store.applySnapshot(payload),
-    state: (payload) => store.applyState(payload),
-    stats: (payload) => store.applyStats(payload),
-    logs: (payload) => store.applyLogs(payload),
-    commands: (payload) => store.applyCommands(payload),
-  });
-
-  // Reachable from the browser console, because the whole point of this page
-  // is debugging: `ligmax.store.state`, `ligmax.map.camera`, and so on.
-  window.ligmax = { store, map, logConsole, commandPanel, kpiStrip, telemetryPanels };
-
-  // The vessel going quiet produces no events, so age-dependent parts of the
-  // UI need their own heartbeat.
-  window.setInterval(() => {
-    if (store.stats?.last_frame_at) {
-      store.stats.last_frame_age = Date.now() / 1000 - store.stats.last_frame_at;
-    }
-    updateHeader(store);
+  startHeartbeat(store, () => {
     kpiStrip.update();
-  }, 500);
+    updatePlainFacts(store);
+  });
 }
 
 boot().catch((error) => {
   console.error(error);
-  notify(`Console failed to start: ${error.message}`, 'error', 30000);
+  notify(`Page failed to start: ${error.message}`, 'error', 30000);
 });

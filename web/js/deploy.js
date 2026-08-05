@@ -135,11 +135,19 @@ export class DeployPanel {
 
     const dot = document.createElement('span');
     dot.className = 'deploy-dot';
-    dot.dataset.state = repo.node_online ? 'online' : 'offline';
+    dot.dataset.state = repo.self_updating ? 'self' : repo.node_online ? 'online' : 'offline';
     const polled = this._elapsed(repo.last_poll);
-    dot.title = repo.last_poll
-      ? `Node polled ${fmt.ago(polled)}`
-      : 'This node has never polled — is its update timer installed?';
+    if (repo.self_updating) {
+      dot.title = 'This repo is the dashboard itself: it updates in-process, so it never polls.';
+    } else if (repo.last_poll) {
+      dot.title = `Node polled ${fmt.ago(polled)}`;
+    } else {
+      dot.title =
+        'No poll has ever arrived for this repo. Either that node runs no update.py ' +
+        '(nothing polls for it), its service is not running, or its LIGMAX_NODE_KEY ' +
+        'does not match the one in ligmax-server/.env — a wrong key is rejected before ' +
+        'the poll is recorded, so it looks identical to silence.';
+    }
     name.prepend(dot);
 
     const status = document.createElement('div');
@@ -164,7 +172,8 @@ export class DeployPanel {
         update.disabled = this.busy.has(repo.name);
         if (!repo.node_online) {
           update.title =
-            'This node has not polled recently. The request will wait until it does.';
+            'This node has not polled recently, so the request will sit unclaimed ' +
+            'and expire after 30 minutes.';
         }
         update.addEventListener('click', () => this._request(repo.name));
         actions.append(update);
@@ -205,9 +214,15 @@ export class DeployPanel {
     if (repo.last_message) {
       detail.textContent = repo.last_message;
     } else if (!repo.pending && !repo.last_result) {
-      detail.textContent = repo.last_poll
-        ? 'No update run this session.'
-        : 'Node has not checked in.';
+      if (repo.self_updating) {
+        detail.textContent = 'Updates itself — no poller. Ready.';
+      } else if (repo.last_poll) {
+        detail.textContent = 'No update run this session.';
+      } else {
+        // The old copy ("Node has not checked in") read like a fault on every row,
+        // including rows where no poller is supposed to exist at all.
+        detail.textContent = 'Never polled — no updater running on that node.';
+      }
     }
     if (detail.textContent) parts.push(detail);
 

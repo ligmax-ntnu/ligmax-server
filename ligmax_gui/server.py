@@ -212,6 +212,22 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/control")
+    def control() -> Response:
+        """The dense page: every telemetry field, the controls, logs and audit.
+
+        Same read gate as `/` — a non-admin may look, but every button on it is
+        disabled client-side and `/api/command` would refuse them anyway.
+        `?key=` works here too, so an operator can bookmark this page directly.
+        """
+        if (response := consume_key_param(url_for("control"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "control.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.post("/api/logout")
     def logout() -> Response:
         response = jsonify({"ok": True})
