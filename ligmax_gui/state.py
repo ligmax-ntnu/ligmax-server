@@ -265,9 +265,16 @@ class Store:
             self._command_version += 1
         return [c.to_wire() for c in pending]
 
-    def ack_commands(self, acks: Iterable[Any]) -> int:
-        """Apply `{"id": "c3", "status": "acked", "result": "..."}` reports."""
-        applied = 0
+    def ack_commands(self, acks: Iterable[Any]) -> list[Command]:
+        """Apply `{"id": "c3", "status": "acked", "result": "..."}` reports.
+
+        Returns the commands that were actually matched, so a caller can react to
+        a specific one landing - `server.py` turns an acked `update` into a deploy
+        panel result. A late ack still applies: `expire_commands()` gives up after
+        20 s, but a `git pull` plus restart can outlast that and the vessel's real
+        answer should win over the guess.
+        """
+        applied: list[Command] = []
         now = time.time()
         with self._lock:
             by_id = {c.id: c for c in self._commands}
@@ -284,7 +291,7 @@ class Store:
                 command.acked_at = now
                 if ack.get("result") is not None:
                     command.result = str(ack["result"])[:400]
-                applied += 1
+                applied.append(command)
             if applied:
                 self._command_version += 1
         return applied
@@ -304,6 +311,18 @@ class Store:
                 self._command_version += 1
 
     # -- read paths ---------------------------------------------------------
+
+    def vessel_online(self, within: float = STALE_AFTER) -> bool:
+        """True if a telemetry frame arrived in the last `within` seconds.
+
+        Read-only, unlike `_refresh_liveness()`: it touches no version counter, so
+        a plain GET can ask without waking every SSE client. Callers that are
+        asking "can the vessel still be reached" rather than "is the feed smooth"
+        should pass a window well above the 1 Hz publish rate - a single dropped
+        frame is not a disconnection.
+        """
+        last = self.stats.get("last_frame_at")
+        return last is not None and (time.time() - last) < within
 
     def _refresh_liveness(self) -> None:
         last = self.stats.get("last_frame_at")

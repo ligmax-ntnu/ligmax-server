@@ -38,8 +38,13 @@ def main() -> int:
 
     stop = threading.Event()
     if config.udp_port:
+        # The registry goes along so an `update` acked over UDP still lands in the
+        # Software panel, the same as one acked over POST /api/ingest.
         threading.Thread(
-            target=serve_udp, args=(config, store, stop), daemon=True, name="udp-ingest"
+            target=serve_udp,
+            args=(config, store, stop, app.config["LIGMAX_DEPLOY"]),
+            daemon=True,
+            name="udp-ingest",
         ).start()
     threading.Thread(
         target=serve_housekeeping, args=(store, stop), daemon=True, name="housekeeping"

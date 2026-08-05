@@ -1,10 +1,12 @@
 /* The software-update panel: one row per repo, with a button that asks its node to pull.
  *
  * Nothing here reaches a node directly. Pressing Update records a request on the
- * server; the node notices on its own outbound poll (deploy/ligmax-update.sh
- * --on-request) and reports back what happened. So a row can legitimately sit at
- * "waiting" for up to a poll interval, and the operator needs to see that rather
- * than wonder whether the click registered.
+ * server, and the node collects it on a connection it already has open: for a
+ * `commanded` repo (the vessel) that is the reply to its next telemetry POST,
+ * like any other operator command; for the rest it is the node's own /pending
+ * poll. Either way a row can legitimately sit at "waiting" for a second or two,
+ * and the operator needs to see that rather than wonder whether the click
+ * registered.
  *
  * This panel polls /api/deploy rather than riding the SSE stream: deployments are a
  * once-in-a-while thing, and keeping them off the telemetry cursor means a stuck
@@ -139,6 +141,12 @@ export class DeployPanel {
     const polled = this._elapsed(repo.last_poll);
     if (repo.self_updating) {
       dot.title = 'This repo is the dashboard itself: it updates in-process, so it never polls.';
+    } else if (repo.commanded) {
+      dot.title = repo.node_online
+        ? 'Updates arrive as a vessel command on the telemetry link, which is up.'
+        : 'Updates arrive as a vessel command, and no telemetry frame has come in ' +
+          'recently. Pressing Update queues it anyway — the vessel will collect it ' +
+          'when the link is back, or it expires after 30 minutes.';
     } else if (repo.last_poll) {
       dot.title = `Node polled ${fmt.ago(polled)}`;
     } else {
@@ -171,9 +179,11 @@ export class DeployPanel {
         update.textContent = 'Update';
         update.disabled = this.busy.has(repo.name);
         if (!repo.node_online) {
-          update.title =
-            'This node has not polled recently, so the request will sit unclaimed ' +
-            'and expire after 30 minutes.';
+          update.title = repo.commanded
+            ? 'The vessel is not sending telemetry, so it cannot collect the command ' +
+              'yet. The request waits 30 minutes, then expires.'
+            : 'This node has not polled recently, so the request will sit unclaimed ' +
+              'and expire after 30 minutes.';
         }
         update.addEventListener('click', () => this._request(repo.name));
         actions.append(update);
@@ -216,6 +226,10 @@ export class DeployPanel {
     } else if (!repo.pending && !repo.last_result) {
       if (repo.self_updating) {
         detail.textContent = 'Updates itself — no poller. Ready.';
+      } else if (repo.commanded) {
+        detail.textContent = repo.node_online
+          ? 'Takes updates as a vessel command. Ready.'
+          : 'Takes updates as a vessel command — no telemetry link right now.';
       } else if (repo.last_poll) {
         detail.textContent = 'No update run this session.';
       } else {

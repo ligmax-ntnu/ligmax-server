@@ -128,10 +128,13 @@
             </header>
             <div class="deploy-list" id="deploy-list"></div>
             <p class="card-note card-note--tight">
-              Each node runs its own <code>update.py</code>, which polls this server
-              every 30 s and fast-forwards only — a checkout with uncommitted changes
-              refuses the update rather than discarding it. The dashboard updates
-              itself in-process, so it never polls.
+              The vessel takes its update as a command on the telemetry link, the same
+              way it takes E-stop, and acks the result here. Other nodes poll this
+              server every 30 s from their own <code>update.py</code>; the dashboard
+              updates itself in-process. Every one of them fast-forwards only — a
+              checkout with uncommitted changes refuses the update rather than
+              discarding it. Updating <code>ligmax-pi</code> restarts its nodes, which
+              drops propulsion power for the length of the restart.
             </p>
           </section>
         </div>

@@ -1,20 +1,36 @@
 """Per-repo update requests, so the operator can press a button and a node pulls.
 
-The flow, and why it is shaped this way:
+There are two ways a node can collect its update, and a repo uses exactly one.
+
+**As a vessel command** (`COMMANDED`, currently `ligmax-pi`) -- the default now,
+because it rides the one channel that is already proven to work in the field:
 
     operator clicks "Update" in the dashboard
         -> POST /api/deploy/<repo>          (admin cookie required)
-        -> a request is recorded here with a fresh nonce
+        -> a request is recorded here, and an `update` command is queued
+        -> the command goes down in the reply to the vessel's next telemetry POST,
+           exactly like `estop` and `home_battery`
+        -> io_manager fast-forwards, acks the outcome, and restarts the node tree
+        -> server.py turns that ack back into report_command() below, so the panel
+           shows Updated/Failed and the new SHA
 
-    the node that owns <repo> polls, on its own timer
+**By polling** (every other repo) -- the node asks on its own timer:
+
+    operator clicks "Update"
+        -> POST /api/deploy/<repo>          (admin cookie required)
+        -> a request is recorded here with a fresh nonce
         -> GET /api/deploy/<repo>/pending   (node key required)
         -> sees {"requested": true, "nonce": "..."}
-        -> runs deploy/ligmax-update.sh, which fast-forwards and maybe restarts
+        -> fast-forwards and restarts its child
         -> POST /api/deploy/<repo>/report   with the outcome and the new HEAD
 
-Nodes **poll outbound**. Nothing here ever connects to a node, so no node needs an
-inbound port, a public hostname or a certificate -- which is the only way this works
-for the vessel behind 5G and for a laptop on a competition network.
+Either way the node **connects outbound**. Nothing here ever connects to a node, so
+no node needs an inbound port, a public hostname or a certificate -- which is the
+only way this works for the vessel behind 5G and for a laptop on a competition
+network. The difference is only which outbound channel carries the request, and the
+command channel wins for the vessel because it needs no second secret: a wrong
+`LIGMAX_NODE_KEY` is rejected before the poll is recorded, which looks exactly like
+a node that is switched off.
 
 This is deliberately NOT part of the vessel command queue in `state.py`. Those
 commands steer a 5 kW boat; these ones deploy software. Keeping them apart means an
@@ -50,6 +66,15 @@ NODE_STALE_AFTER = 180.0
 # row would otherwise sit at "has not checked in" for ever, wrongly.
 SELF_UPDATING = ("ligmax-server",)
 
+# Repos whose node collects its update as an operator command on the telemetry
+# channel instead of polling /pending. These never call /pending either, so the
+# same "never checked in" trap applies -- their liveness is the vessel link.
+#
+# Add a repo here only once its node actually handles the `update` command
+# (ligmax-pi: nodes/io_manager/main.py). A repo listed here whose node ignores
+# the command will sit at "Waiting" until the request expires.
+COMMANDED = ("ligmax-pi",)
+
 DEFAULT_REPOS = (
     "ligmax-server",
     "ligmax-pi",
@@ -76,9 +101,10 @@ class RepoState:
     head: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_ui(self, now: float) -> dict[str, Any]:
+    def to_ui(self, now: float, vessel_online: bool = False) -> dict[str, Any]:
         pending = self.nonce is not None
         self_updating = self.name in SELF_UPDATING
+        commanded = self.name in COMMANDED
         return {
             "name": self.name,
             "pending": pending,
@@ -89,7 +115,12 @@ class RepoState:
             # A self-updating repo has no poller, so "online" would always be false.
             # Report it as online instead of implying something is broken.
             "self_updating": self_updating,
+            "commanded": commanded,
+            # For a commanded repo the honest liveness question is "can we reach the
+            # vessel", because that is the channel the button uses -- not whether
+            # some second poller happens to be running.
             "node_online": self_updating
+            or (commanded and vessel_online)
             or (
                 self.last_poll is not None and (now - self.last_poll) < NODE_STALE_AFTER
             ),
@@ -117,12 +148,16 @@ class DeployRegistry:
     def names(self) -> list[str]:
         return list(self._repos)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, vessel_online: bool = False) -> dict[str, Any]:
+        """`vessel_online` is the telemetry link's state, which is what decides
+        whether a COMMANDED repo can be reached at all."""
         now = time.time()
         with self._lock:
             self._expire(now)
             return {
-                "repos": [self._repos[n].to_ui(now) for n in self._repos],
+                "repos": [
+                    self._repos[n].to_ui(now, vessel_online) for n in self._repos
+                ],
                 "server_time": now,
                 "request_ttl": REQUEST_TTL,
             }
@@ -211,6 +246,24 @@ class DeployRegistry:
             repo.requested_at = None
             repo.requested_by = None
             return True, ""
+
+    def report_command(
+        self,
+        name: str,
+        result: str,
+        message: str = "",
+        head: str | None = None,
+    ) -> tuple[bool, str]:
+        """Record an outcome that arrived as a command ack rather than via /report.
+
+        The vessel acks the `update` command on the telemetry channel and never
+        sees a nonce, so we supply the outstanding one on its behalf. Reading it
+        outside the lock is deliberate: if the request has since been cancelled or
+        superseded, report() rejects the stale outcome, which is what we want.
+        """
+        with self._lock:
+            nonce = self._repos[name].nonce
+        return self.report(name, nonce=nonce, result=result, message=message, head=head)
 
     def note_head(self, name: str, head: str) -> None:
         """Let a node report its current HEAD without an update having happened."""

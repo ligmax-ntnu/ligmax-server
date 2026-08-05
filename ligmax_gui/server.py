@@ -37,7 +37,7 @@ from flask import (
 
 from . import auth, protocol
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
-from .deploy import DeployRegistry
+from .deploy import COMMANDED, DeployRegistry
 from .state import Cursor, Store
 
 SELF_REPO = "ligmax-server"  # the one repo we update by restarting ourselves
@@ -47,6 +47,12 @@ STREAM_HEARTBEAT = 15.0  # comment frame keeps proxies from closing the stream
 MAX_STREAM_CLIENTS = 24
 MAX_INGEST_BYTES = 4 * 1024 * 1024
 UDP_RECV_SIZE = 65535
+
+# How recently the vessel must have sent a frame for the Software panel to call a
+# command-driven node reachable. Deliberately far above the 1 Hz publish rate and
+# just over the panel's own idle poll (deploy.js POLL_IDLE_MS), so the dot does not
+# flicker between refreshes on a link that is merely lumpy.
+DEPLOY_LINK_WINDOW = 20.0
 
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
@@ -58,6 +64,18 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # slider ESP32 hunts for the optical centre endstop. It stops holding pitch
     # trim while it searches, so it asks first.
     "home_battery": {"label": "Home battery rail", "args": {}, "confirm": True},
+    # Fast-forward a repo on the vessel and restart the node tree. Issued by the
+    # Software panel's Update button rather than typed, and carries `repo` so the
+    # right node acts on it - every node reads the same command queue, and one
+    # that does not own `repo` ignores it rather than pulling someone else's code.
+    # Dangerous because the restart drops the E-stop relay: propulsion power is
+    # cut for the length of it (docs/deploy.md).
+    "update": {
+        "label": "Update from GitHub",
+        "args": {"repo": "str"},
+        "confirm": True,
+        "danger": True,
+    },
     "hold": {"label": "Hold position", "args": {}},
     "resume": {"label": "Resume mission", "args": {}},
     "arm": {"label": "Arm propulsion", "args": {}, "confirm": True},
@@ -103,6 +121,41 @@ def _client_ip() -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.remote_addr or "?"
+
+
+def absorb_acks(store: Store, deployments: DeployRegistry | None, acks: Any) -> None:
+    """Apply a frame's command acks, and mirror `update` into the deploy panel.
+
+    The vessel answers an `update` on the same channel it answers `estop` on, so
+    the Software panel would otherwise never learn the outcome and would sit at
+    "Waiting" until the request expired. `result` carries git's own message and
+    the ack's `head` the new SHA, both set by io_manager.
+
+    Module level, and takes its collaborators as arguments, because both ingest
+    paths need it and `serve_udp()` runs on its own thread outside create_app().
+    """
+    applied = store.ack_commands(acks)
+    if not applied or deployments is None:
+        return
+    # `head` is an extra field on the ack itself, not part of the command the
+    # operator issued, so pick it out of the raw payload.
+    heads = {
+        str(ack.get("id")): str(ack["head"])[:40]
+        for ack in acks or []
+        if isinstance(ack, dict) and ack.get("head")
+    }
+    for command in applied:
+        if command.name != "update":
+            continue
+        repo = str(command.args.get("repo") or "")
+        if not deployments.known(repo):
+            continue
+        deployments.report_command(
+            repo,
+            result="ok" if command.status == "acked" else "failed",
+            message=command.result or "",
+            head=heads.get(command.id),
+        )
 
 
 def create_app(config: Config | None = None, store: Store | None = None) -> Flask:
@@ -322,7 +375,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             return jsonify({"error": "frame must be a JSON object"}), 400  # type: ignore[return-value]
 
         if acks := payload.pop("acks", None):
-            store.ack_commands(acks)
+            absorb_acks(store, deployments, acks)
         commands = store.ingest(
             payload, transport="http", peer=_client_ip(), size=len(raw)
         )
@@ -381,15 +434,22 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
 
     # -- deployments --------------------------------------------------------
     #
-    # The operator presses a button here; the node that owns the repo notices on its
-    # own outbound poll and runs deploy/ligmax-update.sh. Nothing in this server ever
-    # connects to a node, so no node needs an inbound port.
+    # The operator presses a button here and the node that owns the repo collects
+    # the request on a channel it already has open: the telemetry reply for a
+    # COMMANDED repo, its own /pending poll for the rest. Nothing in this server
+    # ever connects to a node, so no node needs an inbound port.
 
     @app.get("/api/deploy")
     def deploy_state() -> Response:
         if not may_read():
             return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
-        payload = deployments.snapshot()
+        # A COMMANDED repo is reachable exactly when the vessel is, so the dot in
+        # the panel tracks the telemetry link rather than a poll that never comes.
+        # DEPLOY_LINK_WINDOW, not STALE_AFTER: one missed 1 Hz frame greys the link
+        # pill honestly enough, but it must not make Update look unavailable.
+        payload = deployments.snapshot(
+            vessel_online=store.vessel_online(DEPLOY_LINK_WINDOW)
+        )
         payload["admin"] = is_admin()
         response = jsonify(payload)
         response.headers["Cache-Control"] = "no-store"
@@ -424,6 +484,23 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             return jsonify({"ok": True, "restarting": True})
 
         state = deployments.request(repo, issued_by=_client_ip())
+
+        # A COMMANDED repo's node never polls /pending. Send the request down the
+        # telemetry channel instead - the same one that carries estop - so it needs
+        # no second secret and no second connection. The ack comes back the same
+        # way and absorb_acks() turns it into this row's result.
+        if repo in COMMANDED:
+            queued = store.queue_command(
+                "update", {"repo": repo}, issued_by=_client_ip()
+            )
+            store.add_log(
+                "WARN",
+                f"update commanded for {repo} as {queued.id}; propulsion power drops "
+                f"for the restart [{_client_ip()}]",
+                "gui.deploy",
+            )
+            return jsonify({"ok": True, "repo": state, "command": queued.to_ui()})
+
         store.add_log(
             "INFO", f"update requested for {repo} [{_client_ip()}]", "gui.deploy"
         )
@@ -509,8 +586,17 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
 # --- UDP ingest -------------------------------------------------------------
 
 
-def serve_udp(config: Config, store: Store, stop: threading.Event) -> None:
-    """Receive JSON frames over UDP and reply with any queued commands."""
+def serve_udp(
+    config: Config,
+    store: Store,
+    stop: threading.Event,
+    deployments: DeployRegistry | None = None,
+) -> None:
+    """Receive JSON frames over UDP and reply with any queued commands.
+
+    `deployments` is optional only so a test can start the listener alone; pass
+    it from run.py, or an `update` acked over UDP never reaches the panel.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -552,7 +638,7 @@ def serve_udp(config: Config, store: Store, stop: threading.Event) -> None:
             continue
 
         if acks := payload.pop("acks", None):
-            store.ack_commands(acks)
+            absorb_acks(store, deployments, acks)
 
         commands = store.ingest(
             payload, transport="udp", peer=f"{addr[0]}:{addr[1]}", size=len(data)
