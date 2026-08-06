@@ -16,6 +16,7 @@
  * work, not the security boundary.
  */
 
+import { CameraPanel } from './camera.js';
 import { CommandPanel, renderCommandHistory } from './commands.js';
 import { DeployPanel } from './deploy.js';
 import { LogConsole, downloadText } from './logs.js';
@@ -24,13 +25,14 @@ import {
   bootShell,
   connectShellStream,
   notify,
+  savePrefs,
   startHeartbeat,
   updateHeader,
 } from './shell.js';
 import { KpiStrip, TelemetryPanels } from './telemetry.js';
 
 async function boot() {
-  const { store, admin } = await bootShell();
+  const { store, admin, prefs } = await bootShell();
 
   $('readonly-bar').hidden = admin;
   $('deploy-card').hidden = !admin;
@@ -39,6 +41,22 @@ async function boot() {
 
   const kpiStrip = new KpiStrip($('kpi-strip'), store); // all tiles here
   const telemetryPanels = new TelemetryPanels($('telemetry-panels'), store);
+
+  /* --- camera ------------------------------------------------------- */
+
+  // Its own poll rather than the SSE stream: frames are not vessel state, and a
+  // picture arriving must not bump the state version every browser reacts to.
+  const cameraPanel = new CameraPanel(
+    {
+      card: $('camera-card'),
+      grid: $('camera-grid'),
+      status: $('camera-status'),
+      toggle: $('camera-toggle'),
+      viewerToggle: $('camera-viewer-toggle'),
+      quality: $('camera-quality'),
+    },
+    { admin, notify, prefs, savePrefs }
+  ).start();
 
   /* --- log console -------------------------------------------------- */
 
@@ -119,7 +137,15 @@ async function boot() {
   connectShellStream(store);
 
   // Reachable from the browser console, because this page is for debugging.
-  window.ligmax = { store, logConsole, commandPanel, kpiStrip, telemetryPanels, deployPanel };
+  window.ligmax = {
+    store,
+    logConsole,
+    commandPanel,
+    kpiStrip,
+    telemetryPanels,
+    deployPanel,
+    cameraPanel,
+  };
 
   startHeartbeat(store, () => kpiStrip.update());
 }

@@ -44,6 +44,10 @@ import urllib.request
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urlparse
 
+# The only intra-package import here, and a deliberate one: `status` is a closed
+# vocabulary and both ends have to agree on it, so it is defined once.
+from . import protocol
+
 _MAX_QUEUED_LOGS = 400
 _UDP_SAFE_BYTES = 60000  # below the 65507-byte datagram ceiling
 
@@ -206,6 +210,7 @@ class GuiClient:
         paths: Sequence[Any] | None = None,
         scan: Any = None,
         telemetry: dict[str, Any] | None = None,
+        status: Any = None,
         mode: Any = None,
         estop: bool | None = None,
         available_modes: Sequence[str] | None = None,
@@ -248,6 +253,22 @@ class GuiClient:
             frame["scan"] = _to_jsonable(scan)
         if telemetry is not None:
             frame["telemetry"] = _to_jsonable(telemetry)
+        # `status` is the closed vocabulary (protocol.VESSEL_STATUS) that drives the
+        # operator's status indicator and the colour of the hull lights; `mode` is
+        # whatever the autopilot calls itself, free text.
+        #
+        # An unrecognised name is dropped and recorded rather than raised on -
+        # publish() never raises, because it is called from a control loop - and
+        # rather than passed through, because the dashboard would drop it anyway
+        # and `last_error` is where someone will actually find out why.
+        if status is not None:
+            name = getattr(status, "name", None) or str(status)
+            if (canonical := protocol.normalise_status(name)) is not None:
+                frame["status"] = canonical
+            else:
+                self.last_error = (
+                    f"status {name!r} is not one of {protocol.VESSEL_STATUS}, dropped"
+                )
         if mode is not None:
             frame["mode"] = getattr(mode, "name", None) or str(mode)
         if estop is not None:

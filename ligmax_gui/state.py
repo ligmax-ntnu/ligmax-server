@@ -110,7 +110,8 @@ class Store:
         self._max_scan_points = max_scan_points
 
         self.state: dict[str, Any] = {
-            "mode": None,
+            "status": None,  # protocol.VESSEL_STATUS - who is in charge
+            "mode": None,  # the autopilot's own mode name, free text
             "estop": False,
             "available_modes": [],
             "origin": None,
@@ -214,9 +215,17 @@ class Store:
         self._last_history_at = now
         sample = _flatten_numeric(self.state.get("telemetry") or {})
 
+        # `derived.speed` is the one series the speed tile charts, so it has to
+        # mean the same thing for the whole run. Prefer the GNSS figure, which is
+        # what the operator reads, and fall back to the fused velocity so a bench
+        # run with no fix still draws a line. web/js/store.js does the same.
         boat = self.state.get("boat") or {}
-        if isinstance(velocity := boat.get("velocity"), list) and len(velocity) >= 2:
-            sample["derived.speed"] = (velocity[0] ** 2 + velocity[1] ** 2) ** 0.5
+        speed = sample.get("motion.sog")
+        if speed is None and isinstance(velocity := boat.get("velocity"), list):
+            if len(velocity) >= 2:
+                speed = (velocity[0] ** 2 + velocity[1] ** 2) ** 0.5
+        if speed is not None:
+            sample["derived.speed"] = float(speed)
         sample["derived.track_count"] = float(len(self.state.get("tracks") or []))
         sample["derived.link_hz"] = float(self.stats.get("hz") or 0.0)
 

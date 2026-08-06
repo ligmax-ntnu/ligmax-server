@@ -11,6 +11,14 @@ Transports
     node  -> server   GET  /api/deploy/<repo>/pending   (node key; polled outbound)
                       POST /api/deploy/<repo>/report
     browser -> server POST /api/deploy/<repo>           (admin cookie required)
+
+    jetson -> server  POST /api/camera?cam=0            (boat key; JPEG body)
+                      GET  /api/camera/config           (boat key; polled outbound)
+    browser -> server GET  /api/camera/0.jpg            (read gate)
+                      POST /api/camera/config           (admin cookie required)
+
+Every one of those boat-side links is *outbound from the vessel*, including the
+video: on 4G there is no route in. See `camera.py`.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from flask import (
 )
 
 from . import auth, protocol
+from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
 from .state import Cursor, Store
@@ -172,6 +181,8 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     stream_clients = threading.Semaphore(MAX_STREAM_CLIENTS)
     deployments = DeployRegistry(config.repos)
     app.config["LIGMAX_DEPLOY"] = deployments
+    cameras = CameraRelay()
+    app.config["LIGMAX_CAMERA"] = cameras
 
     for warning in [*config.warnings, *protocol.check_shared_settings_sync()]:
         store.add_log("WARN", warning, name="gui.config")
@@ -298,10 +309,106 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 "obstacle_types": protocol.OBSTACLE_TYPES,
                 "wrong_side_length": protocol.WRONG_SIDE_LENGTH,
                 "commands": COMMAND_SPECS,
+                "vessel_status": protocol.VESSEL_STATUS,
                 "server_time": time.time(),
                 "shared_settings": protocol.SHARED_SETTINGS_AVAILABLE,
             }
         )
+
+    # -- camera -------------------------------------------------------------
+    #
+    # Frames arrive from `ligmax-json.local` as ordinary outbound POSTs, because
+    # from the water there is no route in. Off by default: this shares the 4G
+    # uplink with the telemetry and the command channel, and video is the only
+    # payload here big enough to crowd them out. See camera.py.
+
+    @app.post("/api/camera")
+    def camera_ingest() -> Response:
+        if not boat_authorised():
+            store.note_rejected()
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+
+        # Nothing is stored while the stream is off, so a sender that ignores the
+        # config cannot keep the panel alive - and the reply tells it to stop.
+        if not cameras.enabled:
+            return jsonify({"ok": False, "enabled": False, **cameras.poll()})  # type: ignore[return-value]
+
+        body = request.get_data(cache=False)
+        if len(body) > MAX_CAMERA_BYTES:
+            store.note_rejected()
+            return jsonify({"error": "frame too large"}), 413  # type: ignore[return-value]
+
+        meta: dict[str, Any] = {}
+        for key in ("t", "width", "height", "label", "fps", "seq"):
+            if (value := request.args.get(key)) is not None:
+                meta[key] = value
+        for key in ("width", "height", "seq"):
+            if key in meta:
+                try:
+                    meta[key] = int(float(meta[key]))
+                except (TypeError, ValueError):
+                    meta.pop(key)
+
+        ok, why = cameras.accept(
+            request.args.get("cam", "0"),
+            body,
+            request.headers.get("Content-Type", "image/jpeg"),
+            meta,
+        )
+        if not ok:
+            store.add_log("WARN", f"camera frame rejected: {why}", "gui.camera")
+            return jsonify({"error": why}), 400  # type: ignore[return-value]
+        # The config rides back on every frame, so a change to fps or width takes
+        # effect on the next frame instead of the next poll.
+        return jsonify({"ok": True, **cameras.poll()})
+
+    @app.get("/api/camera/config")
+    def camera_config() -> Response:
+        """What the Jetson should be sending. Polled outbound, like /pending."""
+        if not boat_authorised() and not node_authorised():
+            return jsonify({"error": "boat key required"}), 403  # type: ignore[return-value]
+        response = jsonify(cameras.poll())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/camera/config")
+    def camera_configure() -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        payload = request.get_json(silent=True) or {}
+        stream = cameras.configure(payload, by=_client_ip())
+        store.add_log(
+            "INFO",
+            f"camera stream {'on' if stream['enabled'] else 'off'} "
+            f"({stream['max_width']} px, q{stream['jpeg_quality']}, "
+            f"{stream['fps']} fps) [{_client_ip()}]",
+            "gui.camera",
+        )
+        return jsonify({"ok": True, "stream": stream})
+
+    @app.get("/api/camera/state")
+    def camera_state() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify(cameras.state())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/camera/<cam>.jpg")
+    def camera_frame(cam: str) -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        frame = cameras.frame(cam)
+        if frame is None:
+            # 404, not a placeholder image: the panel decides what "no picture"
+            # should look like, and a served grey square would cache as content.
+            return jsonify({"error": "no recent frame"}), 404  # type: ignore[return-value]
+        response = make_response(frame.data)
+        response.headers["Content-Type"] = frame.content_type
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Frame-Age"] = f"{frame.age():.2f}"
+        response.headers["X-Frame-Seq"] = str(frame.seq)
+        return response
 
     # -- telemetry out to browsers ------------------------------------------
 

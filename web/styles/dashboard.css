@@ -140,6 +140,74 @@
   border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
 }
 
+/* The status indicator. Coloured off `data-level`, which status.js derives from
+   the same five states that pick the colour of the lights on the hull — so the
+   pill and the boat are meant to match, and `#lights-pill` appears when they do
+   not. Levels: ok / warn / idle / danger / offline. */
+.pill--status {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.pill--status[data-level='ok'] {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
+}
+
+.pill--status[data-level='ok'] .pill-dot { background: var(--ok); }
+
+.pill--status[data-level='warn'] {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+
+.pill--status[data-level='warn'] .pill-dot { background: var(--warn); }
+
+.pill--status[data-level='idle'] {
+  color: var(--body);
+  background: var(--bg-soft);
+  border-color: var(--line);
+}
+
+.pill--status[data-level='idle'] .pill-dot {
+  background: var(--muted);
+  animation: pulse 4s ease-in-out infinite;
+}
+
+/* Out of control and kill switch both land here. It blinks: this is the one
+   state where a glance at a screen in peripheral vision has to register. */
+.pill--status[data-level='danger'] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
+.pill--status[data-level='danger'] .pill-dot {
+  background: var(--danger);
+  animation: pulse 1s steps(2, end) infinite;
+}
+
+.pill--status[data-level='offline'] {
+  color: var(--muted);
+  background: var(--bg);
+  border-color: var(--line);
+}
+
+/* A hull showing the wrong colour for the reported status. Rare and worth
+   interrupting for, so it is loud. */
+.pill--alarm {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill-dot { animation: none !important; }
+}
+
 .role-badge {
   font-size: 0.7rem;
   font-weight: 700;
@@ -1280,9 +1348,118 @@
   min-width: 0;
 }
 
-/* Four tiles, so let them breathe rather than filling the row with narrow ones. */
+/* A handful of tiles, so let them breathe rather than filling the row with
+   narrow ones. */
 .kpi-strip--basic {
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+/* ---------------------------------------------------------------- camera --
+   Off by default, so the resting state of this card is a message rather than a
+   picture — it has to look deliberate, not broken. */
+
+.card--camera {
+  padding: 0.9rem 1rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.cam-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.cam-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.5rem;
+}
+
+.cam-grid[data-empty='true'] {
+  /* Keeps the card from collapsing to nothing while video is off, so switching
+     it on does not shove the rest of the page down. */
+  min-height: 7rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--blue-soft);
+}
+
+.cam-tile {
+  position: relative;
+  margin: 0;
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  background: #0b1226;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cam-tile[data-live='false'] { opacity: 0.55; }
+
+.cam-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* The frames are tiny on purpose (camera.py DEFAULT_STREAM). Smoothing a
+     480 px frame up to panel size looks better than showing the pixels. */
+  image-rendering: auto;
+  display: block;
+}
+
+.cam-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: center;
+  padding: 0.5rem;
+}
+
+.cam-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.28rem 0.45rem;
+  font-size: 0.68rem;
+  color: #dce7fb;
+  background: linear-gradient(to top, rgba(6, 11, 26, 0.85), rgba(6, 11, 26, 0));
+}
+
+.cam-name {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cam-meta {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cam-controls {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* While the vessel is streaming, the card carries a hint of the accent so it is
+   obvious at a glance that the boat is spending uplink on video. */
+.card--camera[data-streaming='true'] {
+  border-color: color-mix(in srgb, var(--brand-500) 40%, var(--line));
 }
 
 .card--plain {

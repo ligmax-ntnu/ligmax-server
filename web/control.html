@@ -22,11 +22,15 @@
         </a>
 
         <div class="header-live" role="status" aria-live="polite">
+          <span class="pill pill--status" id="status-pill" data-status="UNKNOWN" data-level="offline">
+            <span class="pill-dot"></span><span id="status-text">Unknown</span>
+          </span>
           <span class="pill" id="link-pill" data-state="offline">
             <span class="pill-dot"></span><span id="link-text">Connecting…</span>
           </span>
           <span class="pill pill--mode" id="mode-pill">—</span>
           <span class="pill pill--armed" id="armed-pill" hidden>Disarmed</span>
+          <span class="pill pill--alarm" id="lights-pill" hidden></span>
         </div>
 
         <div class="header-actions">
@@ -111,6 +115,49 @@
                 <button class="btn btn--outline btn--sm" id="raw-send" type="button">Send raw</button>
               </details>
             </div>
+          </section>
+
+          <!-- --------------------------------------------------- camera -->
+          <!-- Same relay as the overview page, with the bandwidth controls
+               exposed: this is where you decide what the boat spends its uplink
+               on. Quality options are pinned to what camera.py will accept. -->
+          <section class="card card--camera" id="camera-card" data-streaming="false">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">Perception</span>
+                <h2 class="card-title">Camera feed</h2>
+              </div>
+              <div class="cam-tools">
+                <label class="field field--inline">
+                  <span class="sr-only">Stream quality</span>
+                  <select id="camera-quality" class="select select--sm" title="Resolution / frame rate / JPEG quality">
+                    <option value="320/1/45">320 px · 1 fps · lean</option>
+                    <option value="480/2/55" selected>480 px · 2 fps · default</option>
+                    <option value="640/3/60">640 px · 3 fps</option>
+                    <option value="960/4/70">960 px · 4 fps · greedy</option>
+                  </select>
+                </label>
+                <button class="chip chip--toggle" id="camera-viewer-toggle" type="button" aria-pressed="true">
+                  Hide in this tab
+                </button>
+              </div>
+            </header>
+            <div class="cam-grid" id="camera-grid" data-empty="true"></div>
+            <p class="card-note card-note--tight" id="camera-status">Camera state unavailable.</p>
+            <div class="cam-controls">
+              <button class="chip chip--toggle chip--wide" id="camera-toggle" type="button" aria-pressed="false" disabled>
+                Send video from the boat
+              </button>
+            </div>
+            <p class="card-note card-note--tight">
+              Frames are pushed up from <code>ligmax-json.local</code> as outbound
+              POSTs — on 4G nothing can reach the vessel, so this is the only way a
+              picture gets to shore. The detections and the front lidar do
+              <em>not</em> come this way: they go to <code>ligmax-pi3.local</code>,
+              which merges them with the aft lidar and sends one fused world model
+              up the telemetry link. So a box on the map and the same box in a frame
+              arrive by different routes — do not expect them to line up exactly.
+            </p>
           </section>
 
           <!-- ------------------------------------------------ telemetry -->

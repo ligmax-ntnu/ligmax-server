@@ -8,7 +8,8 @@ dribble in partial updates from different subsystems independently.
     {
       "seq": 1041,
       "t": 1769552134.482,                    # unix seconds, boat clock
-      "mode": "AUTONOMOUS",
+      "status": "AUTONOMOUS",                 # who is in charge - see VESSEL_STATUS
+      "mode": "AUTO",                         # the autopilot's own mode name
       "estop": false,
       "available_modes": ["MANUAL", "AUTONOMOUS", "HOLD", "DOCKING"],
 
@@ -94,6 +95,77 @@ except Exception:  # numpy missing, file moved, whatever - degrade gracefully
     SHARED_SETTINGS_AVAILABLE = False
 
 OBSTACLE_NAMES: dict[int, str] = {v: k for k, v in OBSTACLE_TYPES.items()}
+
+
+# --- Vessel status ----------------------------------------------------------
+#
+# `mode` is whatever the autopilot calls itself, which is useful and completely
+# unstandardised - ArduPilot says "AUTO", "MANUAL", "HOLD", and a planner might
+# say "docking".  `status` is the separate, closed question the Njord rules ask:
+# *who is in charge of this boat right now.*  Five answers, and the vessel is
+# always in exactly one of them.
+#
+# It is a closed vocabulary because two things downstream are switched off it and
+# neither may ever be ambiguous: the operator's status indicator, and the colour
+# of the lights on the hull.  The mapping is decided once, on the vessel, in
+# `ligmax-pi/nodes/io_manager/status.py`, so the hull and the dashboard cannot
+# disagree - the light colour rides up as `telemetry.lights` and the dashboard
+# shows it next to the status it expected, which is how a mismatch gets noticed.
+#
+#   KILLED          kill switch pulled, propulsion power cut          RED
+#   REMOTE          a human is steering, from RC or the shore client  YELLOW
+#   AUTONOMOUS      running on its own navigation                     GREEN
+#   STANDBY         powered, links up, deliberately not driving       breathing white
+#   OUT_OF_CONTROL  nobody is steering it and it is not stopped       red strobe
+#
+# OUT_OF_CONTROL is the one that earns its place. The other four are states you
+# chose; this is the state you discover, and a boat that cannot say it out loud
+# just shows its last good status forever.
+VESSEL_STATUS = (
+    "AUTONOMOUS",
+    "REMOTE",
+    "STANDBY",
+    "OUT_OF_CONTROL",
+    "KILLED",
+)
+
+_STATUS_ALIASES = {
+    "AUTO": "AUTONOMOUS",
+    "AUTONOMY": "AUTONOMOUS",
+    "SELF_DRIVING": "AUTONOMOUS",
+    "MANUAL": "REMOTE",
+    "RC": "REMOTE",
+    "REMOTE_CONTROL": "REMOTE",
+    "TELEOP": "REMOTE",
+    "IDLE": "STANDBY",
+    "HOLD": "STANDBY",
+    "READY": "STANDBY",
+    "ESTOP": "KILLED",
+    "E_STOP": "KILLED",
+    "KILL": "KILLED",
+    "STOPPED": "KILLED",
+    "LOST": "OUT_OF_CONTROL",
+    "RUNAWAY": "OUT_OF_CONTROL",
+    "UNKNOWN": "OUT_OF_CONTROL",
+}
+
+
+def normalise_status(value: Any) -> str | None:
+    """Coerce a status name into `VESSEL_STATUS`, or None if it is unreadable.
+
+    Aliases are accepted so a node that has only ever known the word "MANUAL"
+    still lands in the right bucket.  Anything genuinely unrecognised returns
+    None rather than a guess: the dashboard then falls back to deriving the
+    status itself, which is more honest than showing a made-up one.
+    """
+    if value is None:
+        return None
+    name = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    if not name:
+        return None
+    if name in VESSEL_STATUS:
+        return name
+    return _STATUS_ALIASES.get(name)
 
 
 def check_shared_settings_sync() -> list[str]:
@@ -365,6 +437,11 @@ def normalise_frame(raw: dict[str, Any], max_scan_points: int = 1500) -> dict[st
 
     if raw.get("mode") is not None:
         frame["mode"] = str(raw["mode"])
+    # An unrecognised status is dropped, not passed through: `status` drives the
+    # operator's indicator and the hull lights, and a value neither end knows the
+    # meaning of is worse than no value at all (the dashboard derives one).
+    if (status := normalise_status(raw.get("status"))) is not None:
+        frame["status"] = status
     if "estop" in raw or "e_stop" in raw:
         frame["estop"] = bool(raw.get("estop", raw.get("e_stop")))
     if isinstance(raw.get("available_modes"), (list, tuple)):

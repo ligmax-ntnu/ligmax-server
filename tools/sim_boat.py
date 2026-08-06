@@ -60,9 +60,57 @@ for _index in range(9):  # a shoreline off to port
 WAYPOINTS = [(0.0, 20.0), (-1.0, 45.0), (1.2, 70.0), (-2.0, 95.0),
              (0.5, 120.0), (0.0, 148.0)]
 
+# The ideal route, as the course would be handed over: a list of GNSS points
+# through the middle of each gate. This is published as a second path with
+# `kind: "reference"` so the dashboard can draw it against the line the planner
+# actually chose, which is the comparison the Njord GUI requirement asks for.
+#
+# It is deliberately *not* the same list as WAYPOINTS. The planner nudges its
+# targets off the gate centres to keep clear of the buoys' avoid radii, and if
+# the two lines were identical the plot would prove nothing.
+IDEAL_ROUTE = [(0.0, 0.0), *[((rx + gx) / 2.0, (ry + gy) / 2.0)
+                             for rx, ry, gx, gy in GATES], (0.0, 152.0)]
+
+# How the simulated pack behaves. The real figures come off the Daly BMS over
+# CAN (`ligmax-pi/nodes/io_manager/battery.py`); these exist to move the widgets.
+PACK_CELLS = 12
+PACK_CAPACITY_AH = 40.6
+PACK_NOMINAL_V = 44.4  # 12S nominal, docs/hardware.md
+
+# Battery-slider travel, from the calibration constants in battery_slider.ino:
+# 3200 steps aft of the optical centre and 5000 forward. Expressed here in mm
+# only because the dashboard field is in mm - the sketch counts steps, and the
+# steps-per-mm figure is not recorded anywhere in git, so this is a stand-in.
+RAIL_MIN_MM, RAIL_MAX_MM = -80.0, 125.0
+
+# Status -> what the hull shows. A mirror of the authoritative table in
+# `ligmax-pi/nodes/io_manager/lights.py`; the mode numbers are the `M<n>` commands
+# `ligmax-subsystems/esp32s/lights_esp/lights_esp.ino` accepts. Kept here only so
+# the simulator can drive the dashboard's lights cross-check - if these two ever
+# disagree, the Pi is right.
+LIGHT_MODES = {
+    "AUTONOMOUS": 0,  # MODE_GREEN
+    "REMOTE": 1,  # MODE_YELLOW
+    "KILLED": 2,  # MODE_RED
+    "OUT_OF_CONTROL": 5,  # MODE_F1_FOG, a 4 Hz red strobe
+    "STANDBY": 7,  # MODE_BREATHING
+}
+LIGHT_COLOURS = {
+    "AUTONOMOUS": "green",
+    "REMOTE": "yellow",
+    "KILLED": "red",
+    "OUT_OF_CONTROL": "red-strobe",
+    "STANDBY": "white",
+}
+
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def wrap180(degrees: float) -> float:
+    """Signed angle difference, wrapped to (-180, 180]."""
+    return ((degrees + 540.0) % 360.0) - 180.0
 
 
 class Sim:
@@ -81,6 +129,13 @@ class Sim:
         self.soc = 0.94
         self.consumed_wh = 0.0
         self.log_at = 0.0
+        # Velocity is kept as a vector rather than derived from heading, because
+        # the two differ: `step()` adds a set so COG is not the same as heading.
+        self.vx, self.vy = 0.0, 0.0
+        self.set_rad = 0.0
+        # `lose_control` sets this, so the OUT_OF_CONTROL status and its red
+        # strobe can be exercised from the dashboard's raw-command box.
+        self.lost_until = 0.0
 
     # -- motion -------------------------------------------------------------
 
@@ -122,15 +177,88 @@ class Sim:
                 events.append(("INFO", "operator go-to reached"))
 
         self.speed = clamp(self.speed, 0.0, self.speed_limit)
-        # A little cross-track wander so the plot is not a dead straight line.
-        wander = 0.12 * math.sin((time.time() - self.t0) * 0.7)
-        self.x += math.cos(self.heading + wander) * self.speed * dt
-        self.y += math.sin(self.heading + wander) * self.speed * dt
+
+        # A little cross-track wander so the plot is not a dead straight line,
+        # plus a slow set to one side. The set is what makes COG differ from
+        # heading: the boat points one way and travels another, which is exactly
+        # the effect the two-needle compass and the COG ray are there to show.
+        now = time.time() - self.t0
+        wander = 0.12 * math.sin(now * 0.7)
+        self.set_rad = 0.16 * math.sin(now * 0.11) + 0.05
+        course = self.heading + wander + (self.set_rad if self.speed > 0.2 else 0.0)
+        self.vx = math.cos(course) * self.speed
+        self.vy = math.sin(course) * self.speed
+        self.x += self.vx * dt
+        self.y += self.vy * dt
 
         power = 42.0 + 190.0 * (self.speed / max(self.speed_limit, 0.1)) ** 2.4
         self.consumed_wh += power * dt / 3600.0
         self.soc = clamp(0.94 - self.consumed_wh / 1800.0, 0.02, 1.0)
         return events
+
+    # -- who is in charge ---------------------------------------------------
+
+    @property
+    def status(self) -> str:
+        """One of protocol.VESSEL_STATUS.
+
+        The real machine is `ligmax-pi/nodes/io_manager/status.py` and it decides
+        this from the autopilot's mode, the RC link and the safety loop. Here it is
+        derived from the simulated mode, plus the `lost_until` fault the operator
+        can inject, so the OUT_OF_CONTROL branch and its red strobe can be seen
+        working without breaking anything on a real boat.
+        """
+        if self.estop:
+            return "KILLED"
+        if self.lost_until > time.time():
+            return "OUT_OF_CONTROL"
+        if self.mode == "MANUAL":
+            return "REMOTE"
+        if not self.armed or self.mode == "HOLD":
+            return "STANDBY"
+        return "AUTONOMOUS"
+
+    # -- GNSS ---------------------------------------------------------------
+
+    def latlon(self) -> tuple[float, float]:
+        """Grid metres to degrees, flat-earth. Fine over a 150 m course."""
+        lat = ORIGIN_LAT + self.y / 111_320.0
+        lon = ORIGIN_LON + self.x / (111_320.0 * math.cos(math.radians(ORIGIN_LAT)))
+        return lat, lon
+
+    @property
+    def heading_deg(self) -> float:
+        return (90.0 - math.degrees(self.heading)) % 360.0
+
+    @property
+    def cog_deg(self) -> float | None:
+        """None below a walking pace: the direction of a near-zero velocity is noise."""
+        if math.hypot(self.vx, self.vy) < 0.15:
+            return None
+        return (90.0 - math.degrees(math.atan2(self.vy, self.vx))) % 360.0
+
+    def cross_track_error(self) -> float:
+        """Signed metres from the nearest leg of IDEAL_ROUTE, positive to starboard.
+
+        This is the number the dashboard puts beside "off the ideal route", so it
+        is measured against the same line the map draws in amber rather than
+        against the planner's own path.
+        """
+        best = 0.0
+        best_distance = float("inf")
+        for (ax, ay), (bx, by) in zip(IDEAL_ROUTE, IDEAL_ROUTE[1:]):
+            lx, ly = bx - ax, by - ay
+            length2 = lx * lx + ly * ly
+            if length2 < 1e-9:
+                continue
+            t = clamp(((self.x - ax) * lx + (self.y - ay) * ly) / length2, 0.0, 1.0)
+            px, py = ax + t * lx, ay + t * ly
+            distance = math.hypot(self.x - px, self.y - py)
+            if distance < best_distance:
+                best_distance = distance
+                # Cross product sign says which side of the leg we are on.
+                best = math.copysign(distance, lx * (self.y - ay) - ly * (self.x - ax))
+        return -best  # flip so positive reads as "to starboard of the route"
 
     # -- what the perception stack would report -----------------------------
 
@@ -206,28 +334,69 @@ class Sim:
             "label": "A* / pure pursuit",
         }
 
+    def paths(self) -> list[dict]:
+        """The ideal route, sent alongside the planned one for comparison.
+
+        Whole thing every frame, not just the part still ahead: the operator wants
+        to see how far the boat strayed from the legs it has already sailed, and
+        that is gone the moment the route is trimmed as it is consumed.
+        """
+        return [
+            {
+                "points": [list(point) for point in IDEAL_ROUTE],
+                "kind": "reference",
+                "label": "Ideal route (GNSS)",
+            }
+        ]
+
     def telemetry(self) -> dict:
         now = time.time() - self.t0
         cell_low = 3.62 + 0.42 * self.soc
-        pack_v = cell_low * 12 + random.gauss(0, 0.02)
+        pack_v = cell_low * PACK_CELLS + random.gauss(0, 0.02)
         power = 42.0 + 190.0 * (self.speed / max(self.speed_limit, 0.1)) ** 2.4
         roll = 2.6 * math.sin(now * 0.9) + random.gauss(0, 0.25)
         pitch = 1.7 * math.sin(now * 0.62 + 1.0) + random.gauss(0, 0.2)
-        heading_deg = (90.0 - math.degrees(self.heading)) % 360.0
+        cog = self.cog_deg
+        tx, ty = self.target
+
+        # Pitch trim: the pack slides fore and aft to cancel pitch, so the rail
+        # position tracks the pitch error rather than being an independent wave.
+        rail_mm = clamp(20.0 - pitch * 18.0, RAIL_MIN_MM, RAIL_MAX_MM)
+
+        # Roll trim. `amas.lua` runs a PD controller on roll and writes the two
+        # servo outputs anti-symmetrically, then adds a common-mode ride-height
+        # offset. Reproduced here so the panel shows the shape of the real thing:
+        # both channels move together for height and apart for roll.
+        roll_us = clamp(-roll * 42.0, -500.0, 500.0)
+        height_us = 60.0 + 40.0 * math.sin(now * 0.19)
+        port_us = clamp(1500.0 + roll_us + height_us, 1000.0, 2000.0)
+        starboard_us = clamp(1500.0 - roll_us + height_us, 1000.0, 2000.0)
+        saturated = port_us in (1000.0, 2000.0) or starboard_us in (1000.0, 2000.0)
 
         return {
             "battery": {
+                # The real numbers come off the Daly BMS over CAN, not from the
+                # autopilot - `source` is what says so on the dashboard, and it is
+                # the field to watch if the SOC ever looks like a guess.
+                "source": "daly_bms",
+                "age": round(random.uniform(0.2, 1.1), 2),
                 "soc": round(self.soc, 4),
                 "voltage": round(pack_v, 2),
                 "current": round(power / max(pack_v, 1.0), 2),
                 "power": round(power, 1),
-                "remaining_wh": round(1800.0 * self.soc, 0),
+                # Wh left, from the BMS's own Ah rating and SOC rather than from a
+                # hardcoded pack size. This is the derivation battery.py uses.
+                "remaining_wh": round(PACK_CAPACITY_AH * self.soc * PACK_NOMINAL_V, 0),
                 "consumed_wh": round(self.consumed_wh, 1),
+                "capacity_ah": PACK_CAPACITY_AH,
                 "cell_min": round(cell_low, 3),
                 "cell_max": round(cell_low + 0.031, 3),
+                "cell_delta": 0.031,
                 "temperature": round(24.5 + 9.0 * (power / 240.0), 1),
                 "cycles": 37,
                 "bms_ok": True,
+                "charge_fet": False,
+                "discharge_fet": not self.estop,
             },
             "power": {
                 "propulsion_w": round(power * 0.82, 1),
@@ -236,14 +405,22 @@ class Sim:
                 "total_w": round(power, 1),
             },
             "motion": {
+                # SOG and COG are the GNSS figures; `speed` is the fused estimate.
+                # They differ here by a hair on purpose, because they do on a boat.
+                "sog": round(math.hypot(self.vx, self.vy), 3),
+                "cog_deg": None if cog is None else round(cog, 1),
+                "heading_deg": round(self.heading_deg, 1),
+                "crab_deg": (
+                    None if cog is None else round(wrap180(self.heading_deg - cog), 1)
+                ),
                 "speed": round(self.speed, 3),
-                "heading_deg": round(heading_deg, 1),
                 "yaw_rate": round(math.degrees(0.9 * math.sin(now * 0.5)), 2),
                 "roll": round(roll, 2),
                 "pitch": round(pitch, 2),
-                "cross_track_error": round(random.gauss(0, 0.22), 3),
-                "distance_to_target": round(
-                    math.hypot(self.target[0] - self.x, self.target[1] - self.y), 2
+                "cross_track_error": round(self.cross_track_error(), 3),
+                "distance_to_target": round(math.hypot(tx - self.x, ty - self.y), 2),
+                "bearing_to_target": round(
+                    (90.0 - math.degrees(math.atan2(ty - self.y, tx - self.x))) % 360.0, 1
                 ),
             },
             "gimbal": {
@@ -266,19 +443,47 @@ class Sim:
                 "starboard_temp": round(27.4 + 12.0 * self.speed, 1),
             },
             "trim": {
-                "battery_rail_mm": round(120.0 + 40.0 * math.sin(now * 0.25), 1),
+                "battery_rail_mm": round(rail_mm, 1),
+                "battery_rail_pct": round(
+                    100.0 * (rail_mm - RAIL_MIN_MM) / (RAIL_MAX_MM - RAIL_MIN_MM), 1
+                ),
+                # "commanded", because the slider ESP32 has no link back to the Pi:
+                # this is the demand it was given, not a measured position. The real
+                # node reports the same distinction (docs/hardware.md).
+                "rail_source": "commanded",
+                "rail_homing": False,
+                "ama_port_us": round(port_us, 0),
+                "ama_starboard_us": round(starboard_us, 0),
+                "ama_roll_us": round(roll_us, 0),
+                "ama_height_us": round(height_us, 0),
+                # In words, because "1560 µs" tells you nothing about what the
+                # actuators are actually doing to the hull.
+                "ama_doing": (
+                    "levelling, lifting" if roll_us > 25 and height_us > 20
+                    else "levelling" if abs(roll_us) > 25
+                    else "holding ride height" if height_us > 20
+                    else "neutral"
+                ),
+                "ama_saturated": saturated,
                 "outrigger_port_mm": round(-8.0 * math.sin(now * 0.9), 1),
                 "outrigger_starboard_mm": round(8.0 * math.sin(now * 0.9), 1),
+            },
+            "lights": {
+                # What the hull is showing. The dashboard cross-checks this against
+                # the status and shouts if they disagree (web/js/status.js).
+                "colour": LIGHT_COLOURS[self.status],
+                "mode": LIGHT_MODES[self.status],
+                "for_status": self.status,
+                "link": True,
+                "acks": int(now),
             },
             "gps": {
                 "fix": "RTK_FIXED" if now % 90 > 12 else "3D",
                 "satellites": 17 + int(3 * math.sin(now * 0.2)),
                 "hdop": round(0.7 + 0.2 * abs(math.sin(now * 0.35)), 2),
-                "lat": round(ORIGIN_LAT + self.y / 111_320.0, 7),
-                "lon": round(
-                    ORIGIN_LON
-                    + self.x / (111_320.0 * math.cos(math.radians(ORIGIN_LAT))), 7
-                ),
+                "lat": round(self.latlon()[0], 7),
+                "lon": round(self.latlon()[1], 7),
+                "altitude": round(1.4 + 0.3 * math.sin(now * 1.1), 2),
             },
             "system": {
                 "cpu_pct": round(38.0 + 18.0 * abs(math.sin(now * 0.4)), 1),
@@ -342,7 +547,20 @@ class Sim:
             self.x, self.y = 0.0, 0.0
             return "acked", "grid origin re-zeroed"
         if name == "raw":
-            return "acked", f"ignored raw payload: {args.get('payload')!r}"
+            # One hook worth having: `{"lose_control": 20}` fakes losing control
+            # for that many seconds, which is the only way to see the status
+            # indicator go to OUT_OF_CONTROL and the lights go to a red strobe
+            # without arranging a real fault. It cannot be reached by accident -
+            # it needs the raw-command box on /control.
+            payload = args.get("payload")
+            if isinstance(payload, dict) and "lose_control" in payload:
+                try:
+                    seconds = clamp(float(payload["lose_control"]), 1.0, 300.0)
+                except (TypeError, ValueError):
+                    return "failed", "lose_control wants a number of seconds"
+                self.lost_until = time.time() + seconds
+                return "acked", f"faking loss of control for {seconds:.0f} s"
+            return "acked", f"ignored raw payload: {payload!r}"
         return "failed", f"simulator does not implement '{name}'"
 
 
@@ -415,6 +633,7 @@ def main() -> int:
 
             scan_divider = (scan_divider + 1) % 3  # scans at a third of the rate
             gui.publish(
+                status=sim.status,
                 mode=sim.mode,
                 estop=sim.estop,
                 available_modes=MODES,
@@ -423,17 +642,20 @@ def main() -> int:
                 grid_bearing=0.0,
                 boat={
                     "position": [sim.x, sim.y],
-                    "velocity": [math.cos(sim.heading) * sim.speed,
-                                 math.sin(sim.heading) * sim.speed],
+                    # The real velocity vector, which is not along the heading -
+                    # see the set in `step()`. That difference is the COG story.
+                    "velocity": [sim.vx, sim.vy],
                     "heading": [math.cos(sim.heading), math.sin(sim.heading)],
                     "radius": 1.15,
                 },
                 tracks=sim.tracks(),
                 path=sim.path(),
+                paths=sim.paths(),  # the ideal route, drawn against the planned one
                 scan=sim.scan() if scan_divider == 0 else None,
                 telemetry=sim.telemetry(),
                 status_text=(
                     "EMERGENCY STOP ENGAGED" if sim.estop
+                    else "NO CONTROL SOURCE" if sim.status == "OUT_OF_CONTROL"
                     else f"{sim.mode.lower()} - waypoint {sim.waypoint_index + 1}"
                     f" of {len(WAYPOINTS)}"
                 ),

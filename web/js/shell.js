@@ -17,6 +17,7 @@
 import { connectStream, fetchSession, logout, scrubUrl, takeNotice } from './api.js';
 import * as fmt from './format.js';
 import { setTypeTable } from './obstacles.js';
+import { lightsAgree, metaFor, resolve as resolveStatus } from './status.js';
 import { Store } from './store.js';
 
 export const $ = (id) => document.getElementById(id);
@@ -66,11 +67,45 @@ export function applyTheme(theme) {
 
 /* --- header ---------------------------------------------------------- */
 
-/** Link pill, mode, armed, E-stop banner, footer counters. */
+/** Status pill, link pill, mode, armed, E-stop banner, footer counters. */
 export function updateHeader(store) {
   const level = store.linkLevel;
   const pill = $('link-pill');
   if (pill) pill.dataset.state = level;
+
+  // The status indicator is the required headline figure, so it goes in the
+  // header of both pages and is the same on both. `resolveStatus` is what turns
+  // a stale link into "out of control" rather than a stale claim.
+  const status = resolveStatus(store);
+  const statusPill = $('status-pill');
+  if (statusPill) {
+    statusPill.dataset.status = status.status ?? 'UNKNOWN';
+    statusPill.dataset.level = status.meta.level;
+    const label = $('status-text');
+    if (label) label.textContent = status.meta.label;
+    const detail = status.stale && status.reported
+      ? `${status.meta.detail} Last reported ${metaFor(status.reported).label}; ${status.reason}.`
+      : status.reason
+        ? `${status.meta.detail} (${status.reason})`
+        : status.meta.detail;
+    statusPill.title = detail;
+    statusPill.setAttribute('aria-label', `Vessel status: ${status.meta.label}. ${detail}`);
+  }
+
+  // A hull showing the wrong colour is a safety-visible fault, so it is called
+  // out rather than left for someone to spot in the telemetry panel.
+  const lightsPill = $('lights-pill');
+  if (lightsPill) {
+    const agrees = lightsAgree(store, status.status);
+    const shown = store.telemetry('lights.colour');
+    lightsPill.hidden = agrees !== false;
+    if (agrees === false) {
+      lightsPill.textContent = `Lights show ${shown}`;
+      lightsPill.title =
+        `The hull is showing ${shown} but the status is ${status.meta.label}, which should be ` +
+        `${status.meta.lightName}. Check the lights ESP32 link.`;
+    }
+  }
 
   const hz = store.stats?.hz;
   const age = store.stats?.last_frame_age;

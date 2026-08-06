@@ -21,9 +21,14 @@ const PALETTE = {
   nogo: '#e2453f',
   path: '#56d0ff',
   pathAlt: '#6f8ab5',
+  // The ideal route the course was set out as, from its GNSS points. Amber so it
+  // never gets mistaken for the cyan path the planner actually chose — the whole
+  // point of drawing both is that the gap between them is visible.
+  route: '#f0b23c',
   scan: '#7fd4ff',
   boat: '#ffffff',
   trail: '#7fb0ff',
+  cog: '#9ee6a8',
 };
 
 const GRID_STEPS = [0.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2000];
@@ -32,6 +37,9 @@ const MAX_PPM = 60;
 const TRAIL_LIMIT = 1800;
 const TRAIL_MAX_AGE = 300; // seconds
 
+/** Path `kind` values that mean "this is the reference, not a plan". */
+const REFERENCE_KINDS = new Set(['reference', 'ideal', 'course', 'survey']);
+
 export const DEFAULT_LAYERS = {
   tiles: true,
   grid: true,
@@ -39,7 +47,9 @@ export const DEFAULT_LAYERS = {
   radii: true,
   scan: true,
   paths: true,
+  route: true,
   trail: true,
+  cog: true,
   labels: true,
   ids: false,
 };
@@ -584,14 +594,31 @@ export class WorldMap {
     }
   }
 
+  /**
+   * Three kinds of line, deliberately kept apart:
+   *
+   *   reference  the ideal route, laid out from the course's GNSS points. Amber,
+   *              long-dashed, with a ring on every waypoint. Bottom of the stack.
+   *   candidate  a plan the planner considered and did not commit to. Grey.
+   *   planned    what it is actually steering. Cyan, glowing, on top.
+   *
+   * Comparing the amber and the cyan is the required "COG with trail vs the ideal
+   * route" read, so nothing may make them look alike.
+   */
   _drawPaths(ctx, state) {
     const paths = state.paths ?? [];
-    // Draw candidates first so the committed path sits on top of them.
-    const ordered = [...paths].sort((a, b) => (a.kind === 'planned' ? 1 : -1));
+    const rank = (path) => (REFERENCE_KINDS.has(path.kind) ? 0 : path.kind === 'planned' ? 2 : 1);
+    const ordered = [...paths].sort((a, b) => rank(a) - rank(b));
 
     for (const path of ordered) {
       const points = path.points ?? [];
       if (points.length < 2) continue;
+
+      if (REFERENCE_KINDS.has(path.kind)) {
+        if (this.layers.route) this._drawReferenceRoute(ctx, path);
+        continue;
+      }
+
       const primary = path.kind === 'planned';
       const screen = points.map(([x, y]) => this.worldToScreen(x, y));
 
@@ -635,6 +662,57 @@ export class WorldMap {
         }
       });
     }
+  }
+
+  /** The ideal route: amber, long-dashed, one numbered ring per GNSS waypoint. */
+  _drawReferenceRoute(ctx, path) {
+    const screen = (path.points ?? []).map(([x, y]) => this.worldToScreen(x, y));
+    if (screen.length < 2) return;
+
+    ctx.save();
+    ctx.strokeStyle = PALETTE.route;
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.setLineDash([10, 6]);
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    screen.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Hollow rings, not filled dots: the survey points are where the boat is
+    // *meant* to pass, and a filled marker reads as something detected.
+    const showNumbers = this.layers.labels && this.camera.ppm > 1.2;
+    screen.forEach(([x, y], index) => {
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.strokeStyle = PALETTE.route;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      if (!showNumbers) return;
+      ctx.font = '600 9px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(10, 17, 40, 0.6)';
+      ctx.fillRect(x - 6, y - 15, 12, 11);
+      ctx.fillStyle = PALETTE.route;
+      ctx.fillText(String(index + 1), x, y - 9.5);
+    });
+
+    if (path.label && this.camera.ppm > 0.8) {
+      const [lx, ly] = screen[Math.floor(screen.length / 2)];
+      ctx.font = '600 10px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const metrics = ctx.measureText(path.label);
+      ctx.fillStyle = 'rgba(10, 17, 40, 0.66)';
+      ctx.fillRect(lx + 6, ly - 7, metrics.width + 6, 14);
+      ctx.fillStyle = PALETTE.route;
+      ctx.fillText(path.label, lx + 9, ly);
+    }
+    ctx.restore();
   }
 
   _drawTracks(ctx, state) {
@@ -787,6 +865,38 @@ export class WorldMap {
       ctx.lineWidth = 1;
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    // Course over ground as a long thin ray, drawn from the GNSS COG rather than
+    // from the velocity vector so it is the same number the tiles show. When it
+    // separates visibly from the bow, that gap *is* the crab angle — which is why
+    // it runs much further out than the velocity arrow and in its own colour.
+    if (this.layers.cog) {
+      const course = this.store.courseDegrees;
+      if (Number.isFinite(course)) {
+        const rad = (course * Math.PI) / 180 - ((state.grid_bearing ?? 0) * Math.PI) / 180;
+        const reach = Math.max(46, radius * 9 * this.camera.ppm);
+        const ex = sx + Math.sin(rad) * reach;
+        const ey = sy - Math.cos(rad) * reach;
+        ctx.save();
+        ctx.strokeStyle = PALETTE.cog;
+        ctx.lineWidth = 1.3;
+        ctx.setLineDash([7, 5]);
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (this.camera.ppm > 1.2) {
+          ctx.font = '600 9px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = PALETTE.cog;
+          ctx.fillText(`COG ${Math.round(course)}°`, ex, ey - 8);
+        }
+        ctx.restore();
+      }
     }
 
     // Velocity vector: three seconds of travel at the current speed.

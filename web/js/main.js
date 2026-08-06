@@ -12,6 +12,7 @@
  * other is a click on the chart.
  */
 
+import { CameraPanel } from './camera.js';
 import { CommandPanel } from './commands.js';
 import * as fmt from './format.js';
 import { WorldMap } from './map.js';
@@ -26,22 +27,40 @@ import {
   startHeartbeat,
   updateHeader,
 } from './shell.js';
+import { resolve as resolveStatus } from './status.js';
 import { KpiStrip } from './telemetry.js';
 
-/* The four figures a visitor can read unaided, in plain words. The precise
-   versions of these — and the other five tiles — are on the control page. */
-const BASIC_KPIS = ['mode', 'speed', 'battery', 'detections'];
+/* The figures a visitor can read unaided, in plain words. The precise versions of
+   these — and every other tile — are on the control page.
+
+   `status` leads, because it is the required status indicator and because it is
+   the only one that answers "should I be worried". */
+const BASIC_KPIS = ['status', 'speed', 'battery', 'target', 'detections'];
 
 const BASIC_LABELS = {
-  mode: {
+  status: {
     label: 'Doing',
-    sub: (store) =>
-      store.state.estop
-        ? 'stopped by the operator'
-        : store.state.status_text ?? (store.state.mode ? 'under way' : 'waiting for the boat'),
+    // Plain words for the same five states the lights show, so someone on the
+    // pontoon and someone at the screen describe the boat the same way.
+    value: (store) => resolveStatus(store).meta.plain,
+    sub: (store) => {
+      const resolved = resolveStatus(store);
+      if (resolved.stale) return resolved.reason ?? 'no word from the boat';
+      return store.state.status_text ?? resolved.meta.detail;
+    },
   },
   speed: { label: 'Speed' },
-  battery: { label: 'Battery' },
+  battery: {
+    label: 'Battery',
+    sub: (store) => {
+      const wh = store.telemetry('battery.remaining_wh');
+      return Number.isFinite(wh) ? `about ${wh.toFixed(0)} Wh left` : 'of the pack';
+    },
+  },
+  target: {
+    label: 'Next waypoint',
+    sub: () => 'metres to go',
+  },
   detections: {
     label: 'Obstacles seen',
     sub: (store) =>
@@ -57,7 +76,11 @@ const LAYER_CHIPS = [
   { key: 'radii', label: 'Avoid radii' },
   { key: 'scan', label: 'Lidar returns' },
   { key: 'paths', label: 'Planned path' },
+  // The two halves of the required comparison, each toggleable on its own so you
+  // can strip the chart back to "where it went" against "where it should have".
+  { key: 'route', label: 'Ideal route' },
   { key: 'trail', label: 'Track history' },
+  { key: 'cog', label: 'Course over ground' },
   { key: 'labels', label: 'Track IDs' },
   { key: 'ids', label: 'Type names' },
 ];
@@ -103,11 +126,31 @@ function updatePlainFacts(store) {
 
   const rows = [];
 
-  const lat = store.telemetry('gps.lat') ?? store.state.origin?.lat;
-  const lon = store.telemetry('gps.lon') ?? store.state.origin?.lon;
+  const { lat, lon } = store.position;
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     rows.push(['Position', `${lat.toFixed(5)}, ${lon.toFixed(5)}`]);
   }
+
+  // Heading and course as one row: on a page for people who have never seen the
+  // boat, "pointing NE, moving ENE" says more than two angles would.
+  const heading = store.headingDegrees;
+  const course = store.courseDegrees;
+  if (Number.isFinite(heading)) {
+    rows.push([
+      'Pointing',
+      Number.isFinite(course)
+        ? `${fmt.compassPoint(heading)}, travelling ${fmt.compassPoint(course)}`
+        : fmt.compassPoint(heading),
+    ]);
+  }
+
+  const waypoint = store.distanceToWaypoint;
+  if (Number.isFinite(waypoint)) {
+    rows.push(['Next waypoint', `${waypoint.toFixed(0)} m away`]);
+  }
+
+  const wh = store.telemetry('battery.remaining_wh');
+  if (Number.isFinite(wh)) rows.push(['Energy left', `${wh.toFixed(0)} Wh`]);
 
   const uptime = store.telemetry('system.uptime_s');
   if (Number.isFinite(uptime)) rows.push(['Running for', fmt.duration(uptime)]);
@@ -301,6 +344,21 @@ async function boot() {
     overrides: BASIC_LABELS,
   });
 
+  /* --- camera ------------------------------------------------------- */
+
+  // No quality picker on this page: choosing what the boat spends its uplink on
+  // is an operator decision, and it lives on /control with the rest of them.
+  const cameraPanel = new CameraPanel(
+    {
+      card: $('camera-card'),
+      grid: $('camera-grid'),
+      status: $('camera-status'),
+      toggle: $('camera-toggle'),
+      viewerToggle: $('camera-viewer-toggle'),
+    },
+    { admin, notify, prefs, savePrefs }
+  ).start();
+
   /* --- operator controls (admin only) ------------------------------- */
 
   if (admin) {
@@ -343,7 +401,7 @@ async function boot() {
 
   connectShellStream(store);
 
-  window.ligmax = { store, map, kpiStrip, commandPanel };
+  window.ligmax = { store, map, kpiStrip, commandPanel, cameraPanel };
 
   startHeartbeat(store, () => {
     kpiStrip.update();

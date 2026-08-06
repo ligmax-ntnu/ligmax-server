@@ -9,6 +9,7 @@
 
 import * as fmt from './format.js';
 import { drawCompass, drawLevelBubble, drawSparkline } from './sparkline.js';
+import { resolve as resolveStatus } from './status.js';
 import { flattenNumeric } from './store.js';
 
 const BELOW = 'below';
@@ -17,29 +18,46 @@ const ABOVE = 'above';
 /** kind: number | percent | fraction | bool | text | angle */
 const FIELDS = {
   'battery.soc': { label: 'State of charge', kind: 'fraction', unit: '%', spark: true, bar: true, warn: 0.35, danger: 0.15, direction: BELOW },
+  'battery.remaining_wh': { label: 'Energy left', unit: 'Wh', digits: 0, spark: true, warn: 300, danger: 120, direction: BELOW },
   'battery.voltage': { label: 'Pack voltage', unit: 'V', digits: 2, spark: true, warn: 43, danger: 40, direction: BELOW },
   'battery.current': { label: 'Current', unit: 'A', digits: 1, spark: true },
   'battery.power': { label: 'Draw', unit: 'W', digits: 0, spark: true },
-  'battery.remaining_wh': { label: 'Remaining', unit: 'Wh', digits: 0 },
   'battery.consumed_wh': { label: 'Consumed', unit: 'Wh', digits: 0 },
+  'battery.capacity_ah': { label: 'Pack capacity', unit: 'Ah', digits: 2 },
   'battery.cell_min': { label: 'Cell min', unit: 'V', digits: 3, warn: 3.5, danger: 3.3, direction: BELOW },
   'battery.cell_max': { label: 'Cell max', unit: 'V', digits: 3, warn: 4.15, danger: 4.22, direction: ABOVE },
+  'battery.cell_delta': { label: 'Cell spread', unit: 'V', digits: 3, warn: 0.06, danger: 0.12, direction: ABOVE },
   'battery.temperature': { label: 'Pack temp', unit: '°C', digits: 1, spark: true, warn: 45, danger: 55, direction: ABOVE },
   'battery.cycles': { label: 'Cycles', digits: 0 },
   'battery.bms_ok': { label: 'BMS', kind: 'bool', goodWhen: true },
+  'battery.charge_fet': { label: 'Charge FET', kind: 'bool' },
+  'battery.discharge_fet': { label: 'Discharge FET', kind: 'bool', goodWhen: true },
+  // Which sensor these numbers came from. The Njord requirement is that the
+  // battery figures are the pack's own, read off the Daly BMS over CAN - not the
+  // autopilot's estimate - so it is worth showing which one is answering.
+  'battery.source': { label: 'Read from', kind: 'text', goodValues: ['daly_bms'], warnValues: ['pixhawk'] },
+  'battery.age': { label: 'Reading age', unit: 's', digits: 1, warn: 4, danger: 10, direction: ABOVE },
 
   'power.propulsion_w': { label: 'Propulsion', unit: 'W', digits: 0, spark: true },
   'power.compute_w': { label: 'Compute', unit: 'W', digits: 0 },
   'power.actuators_w': { label: 'Actuators', unit: 'W', digits: 0 },
   'power.total_w': { label: 'Total', unit: 'W', digits: 0, spark: true },
 
-  'motion.speed': { label: 'Speed', unit: 'm/s', digits: 2, spark: true },
+  // SOG and COG are the GNSS receiver's own figures, which is what the Njord
+  // requirement asks for. `speed` is the fused estimate the planner steers on,
+  // and heading is where the bow points - the pair of angles is the interesting
+  // part, because heading minus COG is the crab angle the current is imposing.
+  'motion.sog': { label: 'Speed over ground', unit: 'm/s', digits: 2, spark: true },
+  'motion.cog_deg': { label: 'Course over ground', unit: '°', digits: 0 },
   'motion.heading_deg': { label: 'Heading', unit: '°', digits: 0 },
+  'motion.crab_deg': { label: 'Crab (hdg − COG)', unit: '°', digits: 0, warn: 12, danger: 25, direction: ABOVE, absolute: true },
+  'motion.speed': { label: 'Speed (fused)', unit: 'm/s', digits: 2, spark: true },
   'motion.yaw_rate': { label: 'Yaw rate', unit: '°/s', digits: 1, spark: true },
   'motion.roll': { label: 'Roll', unit: '°', digits: 1, spark: true, warn: 8, danger: 14, direction: ABOVE, absolute: true },
   'motion.pitch': { label: 'Pitch', unit: '°', digits: 1, spark: true, warn: 8, danger: 14, direction: ABOVE, absolute: true },
-  'motion.cross_track_error': { label: 'Cross-track', unit: 'm', digits: 2, spark: true, warn: 1.5, danger: 3, direction: ABOVE, absolute: true },
-  'motion.distance_to_target': { label: 'To target', unit: 'm', digits: 1 },
+  'motion.cross_track_error': { label: 'Off the ideal route', unit: 'm', digits: 2, spark: true, warn: 1.5, danger: 3, direction: ABOVE, absolute: true },
+  'motion.distance_to_target': { label: 'To next waypoint', unit: 'm', digits: 1, spark: true },
+  'motion.bearing_to_target': { label: 'Waypoint bearing', unit: '°', digits: 0 },
 
   'gimbal.pitch': { label: 'Residual pitch', unit: '°', digits: 2, spark: true, warn: 1.5, danger: 3, direction: ABOVE, absolute: true },
   'gimbal.roll': { label: 'Residual roll', unit: '°', digits: 2, spark: true, warn: 1.5, danger: 3, direction: ABOVE, absolute: true },
@@ -54,15 +72,44 @@ const FIELDS = {
   'thrusters.port_temp': { label: 'Port temp', unit: '°C', digits: 1, warn: 60, danger: 75, direction: ABOVE },
   'thrusters.starboard_temp': { label: 'Stbd temp', unit: '°C', digits: 1, warn: 60, danger: 75, direction: ABOVE },
 
-  'trim.battery_rail_mm': { label: 'Battery rail', unit: 'mm', digits: 0, spark: true },
+  // Pitch trim: where the 1.8 kWh pack is sitting on its rails. `rail_source`
+  // says whether that is measured or merely commanded - the slider ESP32 has no
+  // link back to the Pi, so a number here is the demand it was given unless
+  // something new is reporting position (docs/hardware.md).
+  'trim.battery_rail_mm': { label: 'Battery slider', unit: 'mm', digits: 0, spark: true, bar: false },
+  'trim.battery_rail_pct': { label: 'Slider travel', unit: '%', digits: 0, bar: true },
+  'trim.rail_source': { label: 'Slider figure is', kind: 'text', goodValues: ['measured'], warnValues: ['commanded'] },
+  'trim.rail_homing': { label: 'Slider homing', kind: 'bool', goodWhen: false },
+  // Roll trim: the amas. `amas.lua` on the flight controller writes two servo
+  // outputs, anti-symmetric for roll and common-mode for ride height, and the
+  // translator ESP32 turns those pulses into H-bridge drive.
+  'trim.ama_port_us': { label: 'Ama port demand', unit: 'µs', digits: 0, spark: true },
+  'trim.ama_starboard_us': { label: 'Ama stbd demand', unit: 'µs', digits: 0, spark: true },
+  'trim.ama_roll_us': { label: 'Roll correction', unit: 'µs', digits: 0, spark: true, warn: 350, danger: 480, direction: ABOVE, absolute: true },
+  'trim.ama_height_us': { label: 'Ride height', unit: 'µs', digits: 0, spark: true },
+  'trim.ama_doing': { label: 'Amas are', kind: 'text' },
+  // Both outputs saturate at 1000/2000 µs. A full-travel height command uses all
+  // of that and leaves no roll authority (docs/findings.md item 10), which looks
+  // like the roll loop having failed, so it gets its own flag.
+  'trim.ama_saturated': { label: 'Ama output maxed', kind: 'bool', goodWhen: false },
   'trim.outrigger_port_mm': { label: 'Outrigger port', unit: 'mm', digits: 0, spark: true },
   'trim.outrigger_starboard_mm': { label: 'Outrigger stbd', unit: 'mm', digits: 0, spark: true },
 
+  'gps.lat': { label: 'Latitude', digits: 6, wide: true },
+  'gps.lon': { label: 'Longitude', digits: 6, wide: true },
   'gps.fix': { label: 'Fix', kind: 'text', goodValues: ['RTK_FIXED', 'RTK', 'FIXED'], warnValues: ['3D', 'RTK_FLOAT', 'DGPS'] },
   'gps.satellites': { label: 'Satellites', digits: 0, warn: 8, danger: 5, direction: BELOW },
   'gps.hdop': { label: 'HDOP', digits: 2, warn: 2, danger: 4, direction: ABOVE },
-  'gps.lat': { label: 'Latitude', digits: 6 },
-  'gps.lon': { label: 'Longitude', digits: 6 },
+  'gps.altitude': { label: 'Altitude', unit: 'm', digits: 1 },
+
+  // What the hull is showing, reported back by the node that drives the lights
+  // ESP32. This is here so a mismatch between the status and the actual colour is
+  // visible rather than something only a person on the pontoon can see.
+  'lights.colour': { label: 'Showing', kind: 'text' },
+  'lights.mode': { label: 'ESP32 mode', digits: 0 },
+  'lights.for_status': { label: 'Set for', kind: 'text' },
+  'lights.link': { label: 'Lights link', kind: 'bool', goodWhen: true },
+  'lights.acks': { label: 'Acks', digits: 0 },
 
   'autonomy.planner': { label: 'Planner', kind: 'text' },
   'autonomy.replans': { label: 'Replans', digits: 0 },
@@ -86,13 +133,31 @@ const FIELDS = {
 };
 
 const GROUPS = [
-  { key: 'battery', eyebrow: 'Energy', title: 'Battery & BMS', hero: 'battery.soc' },
+  {
+    key: 'battery',
+    eyebrow: 'Energy',
+    title: 'Battery & BMS',
+    hero: 'battery.soc',
+    // The Wh figure beside the percentage, because "38 %" of an unknown pack is
+    // not a number you can plan a run around.
+    heroSide: (map) => {
+      const wh = map.get('battery.remaining_wh');
+      return Number.isFinite(wh) ? `${fmt.fixed(wh, 0)} Wh left` : '';
+    },
+  },
   { key: 'power', eyebrow: 'Energy', title: 'Power budget' },
-  { key: 'motion', eyebrow: 'Dynamics', title: 'Motion & attitude', compass: true, bubble: { roll: 'motion.roll', pitch: 'motion.pitch', limit: 15, label: 'hull' } },
+  {
+    key: 'motion',
+    eyebrow: 'Dynamics',
+    title: 'Motion & attitude',
+    compass: true,
+    bubble: { roll: 'motion.roll', pitch: 'motion.pitch', limit: 15, label: 'hull' },
+  },
+  { key: 'gps', eyebrow: 'Navigation', title: 'GNSS position' },
   { key: 'gimbal', eyebrow: 'Perception', title: 'Lidar gimbal', bubble: { roll: 'gimbal.roll', pitch: 'gimbal.pitch', limit: 3, label: 'residual' } },
   { key: 'thrusters', eyebrow: 'Propulsion', title: 'Thrusters' },
-  { key: 'trim', eyebrow: 'Stabilisation', title: 'Active trim' },
-  { key: 'gps', eyebrow: 'Navigation', title: 'GNSS' },
+  { key: 'trim', eyebrow: 'Stabilisation', title: 'Active trim — slider & amas' },
+  { key: 'lights', eyebrow: 'Signalling', title: 'Navigation lights' },
   { key: 'autonomy', eyebrow: 'Autonomy', title: 'Planner' },
   { key: 'system', eyebrow: 'Compute', title: 'System health' },
   { key: 'bilge', eyebrow: 'Safety', title: 'Bilge & hull' },
@@ -305,9 +370,12 @@ class GroupPanel {
     }
 
     if (drawSparks && this.compass) {
+      // Heading is the solid arrow, COG the dashed needle. When they separate,
+      // the gap is the set the boat is fighting - which is the whole reason the
+      // compass draws two things instead of one.
       drawCompass(this.compass, {
         heading: map.get('motion.heading_deg') ?? 0,
-        course: null,
+        course: map.get('motion.cog_deg') ?? null,
       });
     }
     if (drawSparks && this.bubble) {
@@ -418,18 +486,41 @@ function specOrder(path) {
 
 const KPIS = [
   {
+    // The required status indicator. `resolveStatus` is what makes this read
+    // "Out of control" when the link has gone quiet rather than repeating the
+    // last thing the boat managed to say.
+    key: 'status',
+    label: 'Status',
+    value: (store) => resolveStatus(store).meta.label,
+    sub: (store) => {
+      const resolved = resolveStatus(store);
+      if (resolved.stale && resolved.reason) return resolved.reason;
+      return store.state.mode ? `autopilot: ${store.state.mode}` : resolved.meta.plain;
+    },
+    level: (store) => {
+      const { level } = resolveStatus(store).meta;
+      return level === 'idle' ? null : level;
+    },
+  },
+  {
     key: 'mode',
-    label: 'Mode',
+    label: 'Autopilot mode',
     value: (store) => store.state.mode ?? '—',
     sub: (store) => store.state.status_text ?? (store.state.estop ? 'emergency stop' : ''),
     level: (store) => (store.state.estop ? 'danger' : store.state.mode ? 'ok' : null),
   },
   {
+    // Speed over ground, from the GNSS receiver, falling back to the fused
+    // estimate so the tile is not blank on a bench run with no fix.
     key: 'speed',
-    label: 'Speed',
+    label: 'Speed over ground',
     unit: 'm/s',
-    value: (store) => fmt.fixed(store.speed, 2),
-    sub: (store) => `${fmt.knots(store.speed ?? 0)} kn`,
+    value: (store) => fmt.fixed(store.sog, 2),
+    sub: (store) => {
+      const parts = [`${fmt.knots(store.sog ?? 0)} kn`];
+      if (!Number.isFinite(store.telemetry('motion.sog'))) parts.push('fused, no GNSS');
+      return parts.join(' · ');
+    },
     spark: 'derived.speed',
   },
   {
@@ -443,16 +534,51 @@ const KPIS = [
     sub: (store) => fmt.compassPoint(store.headingDegrees ?? NaN),
   },
   {
+    key: 'cog',
+    label: 'Course over ground',
+    unit: '°',
+    value: (store) => {
+      const cog = store.courseDegrees;
+      return cog === null ? '—' : Math.round(cog);
+    },
+    sub: (store) => {
+      const crab = store.crabDegrees;
+      if (!Number.isFinite(crab)) return fmt.compassPoint(store.courseDegrees ?? NaN);
+      // Which way the boat is being pushed relative to where it points. This is
+      // the number that explains an otherwise baffling cross-track error.
+      const side = crab > 0 ? 'starboard' : 'port';
+      return `${fmt.compassPoint(store.courseDegrees ?? NaN)} · ${Math.abs(Math.round(crab))}° to ${side}`;
+    },
+    level: (store) => levelFor(FIELDS['motion.crab_deg'], store.crabDegrees),
+  },
+  {
+    key: 'position',
+    label: 'Position',
+    value: (store) => {
+      const { lat, lon } = store.position;
+      return Number.isFinite(lat) && Number.isFinite(lon) ? lat.toFixed(6) : '—';
+    },
+    sub: (store) => {
+      const { lat, lon } = store.position;
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return 'no fix reported';
+      const fix = store.telemetry('gps.fix');
+      return [lon.toFixed(6), typeof fix === 'string' ? fix : null].filter(Boolean).join(' · ');
+    },
+    level: (store) => levelFor(FIELDS['gps.fix'], store.telemetry('gps.fix')),
+  },
+  {
     key: 'battery',
     label: 'Battery',
     unit: '%',
     value: (store) => fmt.percent(store.telemetry('battery.soc'), 0),
     sub: (store) => {
-      const voltage = store.telemetry('battery.voltage');
+      const wh = store.telemetry('battery.remaining_wh');
       const power = store.telemetry('battery.power') ?? store.telemetry('power.total_w');
       const parts = [];
-      if (Number.isFinite(voltage)) parts.push(`${fmt.fixed(voltage, 1)} V`);
+      if (Number.isFinite(wh)) parts.push(`${fmt.fixed(wh, 0)} Wh`);
       if (Number.isFinite(power)) parts.push(`${fmt.fixed(power, 0)} W`);
+      // Flag it loudly if this is the autopilot's guess rather than the BMS.
+      if (store.telemetry('battery.source') === 'pixhawk') parts.push('autopilot estimate');
       return parts.join(' · ');
     },
     spark: 'battery.soc',
@@ -470,13 +596,19 @@ const KPIS = [
   },
   {
     key: 'target',
-    label: 'To target',
+    label: 'To next waypoint',
     unit: 'm',
-    value: (store) => fmt.fixed(store.telemetry('motion.distance_to_target'), 1),
+    value: (store) => fmt.fixed(store.distanceToWaypoint, 1),
     sub: (store) => {
+      const parts = [];
+      const waypoint = store.telemetry('autonomy.waypoint');
+      if (Number.isFinite(waypoint)) parts.push(`wp ${waypoint}`);
       const error = store.telemetry('motion.cross_track_error');
-      return Number.isFinite(error) ? `XTE ${fmt.fixed(error, 2)} m` : '';
+      if (Number.isFinite(error)) parts.push(`${fmt.fixed(Math.abs(error), 2)} m off route`);
+      return parts.join(' · ');
     },
+    level: (store) =>
+      levelFor(FIELDS['motion.cross_track_error'], store.telemetry('motion.cross_track_error')),
   },
   {
     key: 'gimbal',
