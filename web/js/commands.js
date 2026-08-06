@@ -18,6 +18,10 @@ const QUICK_COMMANDS = [
   { name: 'estop_clear', label: 'Clear E-stop', variant: 'outline', confirm: 'Clear the emergency stop? Propulsion power will be restored.' },
   { name: 'home_battery', label: 'Home battery', variant: 'outline', confirm: 'Re-home the battery rail? The slider hunts for its centre endstop and stops holding pitch trim until it finds it.' },
   { name: 'clear_waypoints', label: 'Clear route', variant: 'outline' },
+  // Moves the whole chart, not just the boat: the grid origin is what every
+  // position on it is measured from, so the track history and any obstacle
+  // shift with it. Hence the confirmation, and hence it not being on `/`.
+  { name: 'recentre_origin', label: 'Re-zero grid', variant: 'outline', confirm: 'Re-zero the grid origin at the vessel’s current position? Everything already on the chart moves with it.' },
 ];
 
 export class CommandPanel {

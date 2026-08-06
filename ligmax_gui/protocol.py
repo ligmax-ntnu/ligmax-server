@@ -17,7 +17,7 @@ dribble in partial updates from different subsystems independently.
       "grid_bearing": 0.0,                    # compass bearing of +y, degrees
       "upstream_direction": [0.0, 1.0],       # unit vector, grid coords
 
-      "boat": {
+      "boat": {                               # null clears it from the chart
         "position": [12.4, 38.1],             # metres, grid coords
         "velocity": [0.2, 1.8],               # m/s
         "heading": [0.1, 0.99],               # unit vector (or heading_deg)
@@ -44,6 +44,12 @@ default.  If your grid is rotated relative to true north, send
 underlay will be rotated to match.  ``origin`` georeferences grid (0, 0) —
 that is ``Boat.original_gps_position`` — and is what lets the dashboard put
 the vessel on a real map.
+
+``origin`` and ``boat.position`` are the two fields the chart is drawn from, and
+they are **not** interchangeable with ``telemetry.gps.lat/lon``: the map works in
+metres and nothing on the server converts degrees into them.  The vessel owns
+that conversion (``ligmax-pi/nodes/io_manager/navigation.py``), because it is the
+vessel that decides where its grid is zeroed.
 
 Reply
 -----
@@ -466,7 +472,13 @@ def normalise_frame(raw: dict[str, Any], max_scan_points: int = 1500) -> dict[st
         frame["upstream_direction"] = list(upstream)
 
     boat = raw.get("boat")
-    if isinstance(boat, dict):
+    # An explicit null clears the vessel from the chart. Frames merge, so a
+    # vessel that has lost its fix cannot un-say a position by omitting the key -
+    # and a boat drawn where it was thirty seconds ago looks correct, which is
+    # worse than an empty chart. `ligmax-pi`'s navigation.world() sends this.
+    if "boat" in raw and boat is None:
+        frame["boat"] = None
+    elif isinstance(boat, dict):
         out: dict[str, Any] = {}
         for key in ("position", "velocity", "heading"):
             if (pt := _point(boat.get(key))) is not None:

@@ -379,13 +379,23 @@ async function boot() {
 
   /* --- store -> ui -------------------------------------------------- */
 
-  let hasFrame = false;
+  /* The overlay names which "no boat on the chart" this is, because the two have
+     different fixes: nothing has ever arrived (link, keys, is the vessel on?)
+     versus frames arriving with no position in them (no GNSS fix yet). It is not
+     a one-shot latch — a vessel that loses its fix mid-run goes back to saying so
+     rather than leaving an empty chart with no explanation. */
+  const mapEmpty = $('map-empty');
+  function updateMapEmpty() {
+    const placed = Array.isArray(store.state.boat?.position);
+    mapEmpty.hidden = placed;
+    if (placed) return;
+    mapEmpty.textContent = store.stats?.last_frame_at
+      ? 'The boat is reporting in, but has no position to put on the chart yet.'
+      : 'Waiting for the boat to report in…';
+  }
 
   store.on('state', () => {
-    if (!hasFrame && store.state.boat) {
-      hasFrame = true;
-      $('map-empty').hidden = true;
-    }
+    updateMapEmpty();
     map.onState();
     updateLegend(store);
     kpiStrip.update();
@@ -393,7 +403,10 @@ async function boot() {
     updateHeader(store);
   });
 
-  store.on('stats', () => updateHeader(store));
+  store.on('stats', () => {
+    updateHeader(store);
+    updateMapEmpty();
+  });
   store.on('link', () => {
     updateHeader(store);
     map.invalidate();
