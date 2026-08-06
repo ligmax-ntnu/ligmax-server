@@ -107,6 +107,10 @@ const FIELDS = {
   // different questions — corrections reaching the caster is not the same as
   // corrections reaching the receiver. `gps.fix` is the proof either worked.
   'rtk.link': { label: 'Caster link', kind: 'bool', goodWhen: true },
+  // Connected, and the caster has never sent a byte. Not a broken link: a caster
+  // with no base station pushing to it. Without this the panel reads "link yes,
+  // 0 B" and looks like the vessel's fault, which is where an hour goes.
+  'rtk.waiting_for_base': { label: 'No base station', kind: 'bool', goodWhen: false },
   // A connected socket with a climbing age means the *base* went quiet, which
   // looks perfectly healthy from the boat.
   'rtk.correction_age_s': { label: 'Correction age', unit: 's', digits: 1, warn: 10, danger: 30, direction: ABOVE },
