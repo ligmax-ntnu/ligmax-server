@@ -47,6 +47,7 @@ from . import auth, protocol
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
+from .rtk import NtripCaster
 from .state import Cursor, Store
 
 SELF_REPO = "ligmax-server"  # the one repo we update by restarting ourselves
@@ -183,6 +184,26 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     app.config["LIGMAX_DEPLOY"] = deployments
     cameras = CameraRelay()
     app.config["LIGMAX_CAMERA"] = cameras
+
+    # The NTRIP caster is built here so its log lines land in the operator's log
+    # panel like everything else, but it does not listen until run.py starts its
+    # thread - importing this module must never open a public port.
+    caster = (
+        NtripCaster(
+            host=config.rtk_host,
+            port=config.rtk_port,
+            mount=config.rtk_mount,
+            source_password=config.rtk_source_password,
+            client_user=config.rtk_user,
+            client_password=config.rtk_password,
+            base_lat=config.rtk_base_lat,
+            base_lon=config.rtk_base_lon,
+            log=lambda level, message: store.add_log(level, message, "gui.rtk"),
+        )
+        if config.rtk_enabled
+        else None
+    )
+    app.config["LIGMAX_RTK"] = caster
 
     for warning in [*config.warnings, *protocol.check_shared_settings_sync()]:
         store.add_log("WARN", warning, name="gui.config")
@@ -667,6 +688,24 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             "gui.deploy",
         )
         return jsonify({"ok": True})
+
+    # -- RTK ----------------------------------------------------------------
+
+    @app.get("/api/rtk")
+    def rtk_status() -> Response:
+        """Is the base station up, and how old are its corrections?
+
+        Behind the read gate rather than the admin gate: it is status, not
+        control, and it carries no credentials. The vessel's own view of the
+        same link rides up as `telemetry.rtk` - the two are worth comparing,
+        because corrections reaching this caster is not the same as corrections
+        reaching the receiver.
+        """
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        if caster is None:
+            return jsonify({"enabled": False})
+        return jsonify({"enabled": True, **caster.status()})
 
     # -- static -------------------------------------------------------------
 

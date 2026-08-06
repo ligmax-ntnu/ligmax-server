@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .deploy import DEFAULT_REPOS
+from .rtk import FALLBACK_SOURCE_PASSWORD
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_ROOT = REPO_ROOT / "web"
@@ -44,6 +45,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class Config:
     admin_key: str
@@ -62,6 +70,19 @@ class Config:
     node_key: str = ""
     # Repos the dashboard offers an Update button for.
     repos: tuple[str, ...] = DEFAULT_REPOS
+    # NTRIP caster (rtk.py). Port 2101 is forwarded to this box for rtk.ligmax.no;
+    # both the base station and the vessel dial out to it.
+    rtk_enabled: bool = True
+    rtk_host: str = "0.0.0.0"
+    rtk_port: int = 2101
+    rtk_mount: str = "LIGMAX1"
+    # Without this the caster refuses every base station: an open source port
+    # lets a stranger feed the boat corrections it would trust completely.
+    rtk_source_password: str = ""
+    rtk_user: str = ""
+    rtk_password: str = ""
+    rtk_base_lat: float = 0.0
+    rtk_base_lon: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -116,6 +137,23 @@ def load_config() -> Config:
             "your nodes. Set one before exposing this server."
         )
 
+    rtk_enabled = _env_bool("LIGMAX_RTK_ENABLED", True)
+    rtk_source_password = os.environ.get("LIGMAX_RTK_SOURCE_PASSWORD", "").strip()
+    if not rtk_source_password:
+        # Falls back to a literal in rtk.py so the base station can come up before
+        # anyone can edit `.env` on the ground station. Warned about every start,
+        # because that literal is public.
+        rtk_source_password = FALLBACK_SOURCE_PASSWORD
+        if rtk_enabled:
+            warnings.append(
+                "LIGMAX_RTK_SOURCE_PASSWORD is unset: the NTRIP caster is using the "
+                "fallback password committed in ligmax_gui/rtk.py, which is public. "
+                "Anyone who reads the repo can push corrections, and a rover applies "
+                "whatever it is given while still reporting RTK FIXED - that is a "
+                "position-integrity problem, not a bandwidth one. Set the variable "
+                "here and on the base station."
+            )
+
     raw_repos = os.environ.get("LIGMAX_REPOS", "").strip()
     repos = tuple(r.strip() for r in raw_repos.split(",") if r.strip()) or DEFAULT_REPOS
 
@@ -133,5 +171,14 @@ def load_config() -> Config:
         udp_port=_env_int("LIGMAX_UDP_PORT", 8771),
         max_scan_points=_env_int("LIGMAX_MAX_SCAN_POINTS", 1500),
         log_buffer=_env_int("LIGMAX_LOG_BUFFER", 4000),
+        rtk_enabled=rtk_enabled,
+        rtk_host=os.environ.get("LIGMAX_RTK_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        rtk_port=_env_int("LIGMAX_RTK_PORT", 2101),
+        rtk_mount=os.environ.get("LIGMAX_RTK_MOUNT", "LIGMAX1").strip() or "LIGMAX1",
+        rtk_source_password=rtk_source_password,
+        rtk_user=os.environ.get("LIGMAX_RTK_USER", "").strip(),
+        rtk_password=os.environ.get("LIGMAX_RTK_PASSWORD", "").strip(),
+        rtk_base_lat=_env_float("LIGMAX_RTK_BASE_LAT", 0.0),
+        rtk_base_lon=_env_float("LIGMAX_RTK_BASE_LON", 0.0),
         warnings=warnings,
     )

@@ -102,6 +102,21 @@ const FIELDS = {
   'gps.hdop': { label: 'HDOP', digits: 2, warn: 2, danger: 4, direction: ABOVE },
   'gps.altitude': { label: 'Altitude', unit: 'm', digits: 1 },
 
+  // The vessel's own view of the RTK link, from nodes/io_manager/rtk.py. The
+  // caster's view of the same link is GET /api/rtk on this server; they answer
+  // different questions — corrections reaching the caster is not the same as
+  // corrections reaching the receiver. `gps.fix` is the proof either worked.
+  'rtk.link': { label: 'Caster link', kind: 'bool', goodWhen: true },
+  // A connected socket with a climbing age means the *base* went quiet, which
+  // looks perfectly healthy from the boat.
+  'rtk.correction_age_s': { label: 'Correction age', unit: 's', digits: 1, warn: 10, danger: 30, direction: ABOVE },
+  'rtk.injected': { label: 'Injected', unit: 'B', digits: 0 },
+  'rtk.bytes': { label: 'Received', unit: 'B', digits: 0 },
+  'rtk.dropped': { label: 'Dropped', digits: 0, warn: 1, direction: ABOVE },
+  'rtk.reconnects': { label: 'Reconnects', digits: 0 },
+  'rtk.source': { label: 'Mountpoint', kind: 'text', wide: true },
+  'rtk.last_error': { label: 'Last error', kind: 'text', wide: true },
+
   // What the hull is showing, reported back by the node that drives the lights
   // ESP32. This is here so a mismatch between the status and the actual colour is
   // visible rather than something only a person on the pontoon can see.
@@ -154,6 +169,7 @@ const GROUPS = [
     bubble: { roll: 'motion.roll', pitch: 'motion.pitch', limit: 15, label: 'hull' },
   },
   { key: 'gps', eyebrow: 'Navigation', title: 'GNSS position' },
+  { key: 'rtk', eyebrow: 'Navigation', title: 'RTK corrections' },
   { key: 'gimbal', eyebrow: 'Perception', title: 'Lidar gimbal', bubble: { roll: 'gimbal.roll', pitch: 'gimbal.pitch', limit: 3, label: 'residual' } },
   { key: 'thrusters', eyebrow: 'Propulsion', title: 'Thrusters' },
   { key: 'trim', eyebrow: 'Stabilisation', title: 'Active trim — slider & amas' },
