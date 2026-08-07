@@ -39,12 +39,18 @@ export class CommandPanel {
     this.canSend = canSend;
     this.pickingGoto = false;
     this.onGotoArmed = null;
+    this.pickingMission = false;
+    this.onMissionArmed = null;
+    this.onMissionUndo = null;
+    this.onMissionClear = null;
+    this.missionPoints = [];
 
     this._buildQuickCommands();
     this._bindEstop();
     this._bindMode();
     this._bindSpeed();
     this._bindGoto();
+    this._bindMission();
     this._bindRaw();
     if (!canSend) this._lockDown();
   }
@@ -163,6 +169,10 @@ export class CommandPanel {
   }
 
   setGotoArmed(on) {
+    // The two map pick modes are mutually exclusive - both armed at once would
+    // have a click do one and silently not the other, and the button that lost
+    // would keep showing itself as armed.
+    if (on && this.pickingMission) this.setMissionArmed(false);
     this.pickingGoto = on;
     const button = this.elements.gotoArm;
     button.classList.toggle('is-on', on);
@@ -182,6 +192,72 @@ export class CommandPanel {
     if (!blocked) return;
     const ok = await this._send('goto', { x, y });
     if (ok) this.notify(`Go-to ${x.toFixed(1)}, ${y.toFixed(1)} m queued.`, 'ok');
+  }
+
+  _bindMission() {
+    const { missionArm, missionUndo, missionClear, missionSend } = this.elements;
+    missionArm?.addEventListener('click', () => this.setMissionArmed(!this.pickingMission));
+    missionUndo?.addEventListener('click', () => this.onMissionUndo?.());
+    missionClear?.addEventListener('click', () => {
+      if (!this.missionPoints.length) return;
+      if (!window.confirm('Clear the mission you are laying? Nothing has been sent yet.')) return;
+      this.onMissionClear?.();
+    });
+    missionSend?.addEventListener('click', () => this.submitMission());
+    this._updateMissionUI();
+  }
+
+  setMissionArmed(on) {
+    // See setGotoArmed() - the two map pick modes must never both be armed.
+    if (on && this.pickingGoto) this.setGotoArmed(false);
+    this.pickingMission = on;
+    const button = this.elements.missionArm;
+    if (button) {
+      button.classList.toggle('is-on', on);
+      button.setAttribute('aria-pressed', String(on));
+      button.textContent = on
+        ? 'Click the map to add waypoints — Esc to stop'
+        : 'Lay a mission on the map';
+    }
+    this.onMissionArmed?.(on);
+  }
+
+  /** Called by the map every time the draft changes: a point added, undone or cleared. */
+  setMissionPoints(points) {
+    this.missionPoints = points;
+    this._updateMissionUI();
+  }
+
+  _updateMissionUI() {
+    const { missionUndo, missionClear, missionSend, missionCount } = this.elements;
+    const count = this.missionPoints.length;
+    if (missionCount) {
+      missionCount.textContent = count
+        ? `${count} waypoint${count === 1 ? '' : 's'} laid, not yet sent`
+        : 'No waypoints laid yet';
+    }
+    const empty = !this.canSend || !count;
+    if (missionUndo) missionUndo.disabled = empty;
+    if (missionClear) missionClear.disabled = empty;
+    if (missionSend) missionSend.disabled = empty;
+  }
+
+  /** Confirm and send the drafted mission, then clear it — sent or cancelled. */
+  async submitMission() {
+    const points = this.missionPoints;
+    if (!points.length) return;
+    const summary = points.map(([x, y]) => `${x.toFixed(1)}, ${y.toFixed(1)}`).join(' → ');
+    const blocked = window.confirm(
+      `Send a ${points.length}-waypoint mission to the vessel?\n\n${summary}\n\n` +
+        'The vessel only uploads it — arm and set the mode to AUTO separately to run it.'
+    );
+    if (!blocked) return;
+    const ok = await this._send('set_mission', { points });
+    if (ok) {
+      this.notify(`Mission sent: ${points.length} waypoint(s).`, 'ok');
+      this.onMissionClear?.();
+      this.setMissionArmed(false);
+    }
   }
 
   _bindRaw() {

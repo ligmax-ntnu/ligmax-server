@@ -25,6 +25,11 @@ const PALETTE = {
   // never gets mistaken for the cyan path the planner actually chose — the whole
   // point of drawing both is that the gap between them is visible.
   route: '#f0b23c',
+  // A mission still being laid, before it is sent. Distinct from `route` on
+  // purpose: this is not yet the vessel's ideal route (that colour only
+  // appears once the vessel has echoed the upload back), it is a local, unsent
+  // draft — solid white keeps the two from ever being mistaken for each other.
+  draft: '#ffffff',
   scan: '#7fd4ff',
   boat: '#ffffff',
   trail: '#7fb0ff',
@@ -67,6 +72,13 @@ export class WorldMap {
     this.camera = { cx: 0, cy: 40, ppm: 5.5 };
     this.follow = true;
     this.pickMode = false;
+    // A mission being laid: `missionMode` on means a click adds a point rather
+    // than panning, and `missionDraft` is what has been placed so far, held
+    // here (not in the command panel) because it is drawn every frame like
+    // everything else on the chart. Survives `setMissionMode(false)` so
+    // toggling out to pan and back in does not lose progress.
+    this.missionMode = false;
+    this.missionDraft = [];
 
     this.width = 0;
     this.height = 0;
@@ -127,6 +139,31 @@ export class WorldMap {
   setPickMode(on) {
     this.pickMode = on;
     this.canvas.classList.toggle('is-picking', on);
+  }
+
+  /** Arm/disarm mission-laying. Clicks add waypoints instead of panning while on. */
+  setMissionMode(on) {
+    this.missionMode = on;
+    this.canvas.classList.toggle('is-picking', on || this.pickMode);
+    this.invalidate();
+  }
+
+  addMissionPoint(point) {
+    this.missionDraft.push(point);
+    this.onMissionChange?.(this.missionDraft);
+    this.invalidate();
+  }
+
+  undoMissionPoint() {
+    this.missionDraft.pop();
+    this.onMissionChange?.(this.missionDraft);
+    this.invalidate();
+  }
+
+  clearMissionDraft() {
+    this.missionDraft = [];
+    this.onMissionChange?.(this.missionDraft);
+    this.invalidate();
   }
 
   /** Called whenever a new telemetry frame lands. */
@@ -241,6 +278,10 @@ export class WorldMap {
     new ResizeObserver(() => this._resize()).observe(this.wrap);
 
     canvas.addEventListener('pointerdown', (event) => {
+      if (this.missionMode && event.button === 0) {
+        this.addMissionPoint(this._pointerWorld(event));
+        return;
+      }
       if (this.pickMode && event.button === 0) {
         const [wx, wy] = this._pointerWorld(event);
         this.onPick?.([wx, wy]);
@@ -400,6 +441,7 @@ export class WorldMap {
     if (this.layers.nogo) this._drawNoGo(ctx, state);
     if (this.layers.scan) this._drawScan(ctx, state);
     if (this.layers.paths) this._drawPaths(ctx, state);
+    if (this.missionDraft.length) this._drawMissionDraft(ctx);
     this._drawTracks(ctx, state);
     if (this.layers.trail) this._drawTrail(ctx);
     this._drawBoat(ctx, state);
@@ -712,6 +754,42 @@ export class WorldMap {
       ctx.fillStyle = PALETTE.route;
       ctx.fillText(path.label, lx + 9, ly);
     }
+    ctx.restore();
+  }
+
+  /** A mission being laid, not yet sent: numbered squares, solid white line. */
+  _drawMissionDraft(ctx) {
+    const screen = this.missionDraft.map(([x, y]) => this.worldToScreen(x, y));
+
+    ctx.save();
+    if (screen.length >= 2) {
+      ctx.strokeStyle = PALETTE.draft;
+      ctx.lineWidth = 1.6;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      screen.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.stroke();
+    }
+
+    screen.forEach(([x, y], index) => {
+      ctx.fillStyle = PALETTE.draft;
+      ctx.strokeStyle = 'rgba(10, 17, 40, 0.85)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.rect(x - 4, y - 4, 8, 8);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = '600 9px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(10, 17, 40, 0.7)';
+      ctx.fillRect(x - 6, y - 19, 12, 11);
+      ctx.fillStyle = PALETTE.draft;
+      ctx.fillText(String(index + 1), x, y - 13.5);
+    });
     ctx.restore();
   }
 

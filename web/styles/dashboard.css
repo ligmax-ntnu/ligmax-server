@@ -536,6 +536,24 @@
   justify-content: center;
 }
 
+.mission-lay {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.mission-lay-buttons {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.mission-lay-buttons > button {
+  flex: 1;
+}
+
 .chip-swatch {
   width: 9px;
   height: 9px;

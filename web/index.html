@@ -148,6 +148,25 @@
                 <button class="chip chip--toggle chip--wide" id="goto-arm" type="button" aria-pressed="false">
                   Pick a go-to point on the map
                 </button>
+
+                <!-- Laying a mission is the same kind of map interaction as
+                     go-to, just several points instead of one, so it lives here
+                     too rather than on /control. Sending it only uploads the
+                     route to the autopilot - running it is a separate mode
+                     change and arm, both on the control page, so the two stay
+                     distinct, audited actions. -->
+                <div class="mission-lay">
+                  <button class="chip chip--toggle chip--wide" id="mission-arm" type="button" aria-pressed="false">
+                    Lay a mission on the map
+                  </button>
+                  <p class="card-note card-note--tight" id="mission-count">No waypoints laid yet</p>
+                  <div class="mission-lay-buttons">
+                    <button class="btn btn--outline btn--sm" id="mission-undo" type="button" disabled>Undo point</button>
+                    <button class="btn btn--outline btn--sm" id="mission-clear" type="button" disabled>Clear</button>
+                    <button class="btn btn--primary btn--sm" id="mission-send" type="button" disabled>Send mission</button>
+                  </div>
+                </div>
+
                 <p class="card-note card-note--tight">
                   The stop cuts propulsion power at the safety loop. Modes, arming,
                   trim and the logs are on the <a href="/control">control page</a>.

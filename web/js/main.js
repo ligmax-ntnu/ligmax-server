@@ -366,14 +366,25 @@ async function boot() {
       {
         estopButton: $('estop-btn'),
         gotoArm: $('goto-arm'),
+        missionArm: $('mission-arm'),
+        missionUndo: $('mission-undo'),
+        missionClear: $('mission-clear'),
+        missionSend: $('mission-send'),
+        missionCount: $('mission-count'),
       },
       store,
       { notify }
     );
     commandPanel.onGotoArmed = (on) => map.setPickMode(on);
+    commandPanel.onMissionArmed = (on) => map.setMissionMode(on);
+    commandPanel.onMissionUndo = () => map.undoMissionPoint();
+    commandPanel.onMissionClear = () => map.clearMissionDraft();
+    map.onMissionChange = (points) => commandPanel.setMissionPoints(points);
 
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && commandPanel.pickingGoto) commandPanel.setGotoArmed(false);
+      if (event.key !== 'Escape') return;
+      if (commandPanel.pickingGoto) commandPanel.setGotoArmed(false);
+      if (commandPanel.pickingMission) commandPanel.setMissionArmed(false);
     });
   }
 

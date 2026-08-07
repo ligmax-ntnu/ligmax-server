@@ -24,6 +24,7 @@ video: on 4G there is no route in. See `camera.py`.
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import subprocess
@@ -64,6 +65,10 @@ UDP_RECV_SIZE = 65535
 # flicker between refreshes on a link that is merely lumpy.
 DEPLOY_LINK_WINDOW = 20.0
 
+# Mirrors ligmax-pi/nodes/io_manager/mission.py's MAX_WAYPOINTS - reject an
+# oversized mission here rather than let it reach the vessel and fail there.
+MAX_MISSION_WAYPOINTS = 100
+
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
 COMMAND_SPECS: dict[str, dict[str, Any]] = {
@@ -91,6 +96,12 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     "arm": {"label": "Arm propulsion", "args": {}, "confirm": True},
     "disarm": {"label": "Disarm propulsion", "args": {}},
     "goto": {"label": "Go to point", "args": {"x": "float", "y": "float"}},
+    # An admin-laid route, grid metres like `goto` - see
+    # ligmax-pi/nodes/io_manager/mission.py. The vessel uploads it as a real
+    # MAVLink mission and echoes it back as the map's "ideal route" layer once
+    # accepted; running it is a separate `set_mode` to AUTO plus `arm`, so laying
+    # a route and setting it moving are always two distinct, audited commands.
+    "set_mission": {"label": "Send mission", "args": {"points": "any"}, "confirm": True},
     "clear_waypoints": {"label": "Clear waypoints", "args": {}},
     "set_speed_limit": {"label": "Speed limit", "args": {"value": "float"}},
     "recentre_origin": {"label": "Re-zero grid origin", "args": {}, "confirm": True},
@@ -550,6 +561,35 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 return jsonify(  # type: ignore[return-value]
                     {"error": f"mode '{cleaned['mode']}' not offered by the vessel"}
                 ), 400
+
+        if name == "set_mission":
+            points = cleaned.get("points")
+            if not isinstance(points, list) or not points:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'points' must be a non-empty list of [x, y] pairs"}
+                ), 400
+            if len(points) > MAX_MISSION_WAYPOINTS:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": f"a mission may have at most {MAX_MISSION_WAYPOINTS} waypoints"}
+                ), 400
+            cleaned_points: list[list[float]] = []
+            for item in points:
+                if not (isinstance(item, (list, tuple)) and len(item) >= 2):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": "each waypoint must be an [x, y] pair"}
+                    ), 400
+                try:
+                    x, y = float(item[0]), float(item[1])
+                except (TypeError, ValueError):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": "waypoint coordinates must be numbers"}
+                    ), 400
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": "waypoint coordinates must be finite numbers"}
+                    ), 400
+                cleaned_points.append([x, y])
+            cleaned["points"] = cleaned_points
 
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
         level = "ERROR" if spec.get("danger") else "INFO"
