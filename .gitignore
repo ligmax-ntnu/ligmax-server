@@ -16,3 +16,8 @@ keys/
 # measured. Back it up with the rest of the ground station's state.
 tuning-profiles.json
 tuning-profiles.json.tmp
+
+# Saved /led_control effects (ligmax_gui/lights_effects.py). Same reasoning:
+# these are authored patterns from one session, not source.
+light-effects.json
+light-effects.json.tmp

@@ -70,9 +70,12 @@ class Config:
     node_key: str = ""
     # Repos the dashboard offers an Update button for.
     repos: tuple[str, ...] = DEFAULT_REPOS
-    # Where saved tuning profiles live. The only file this server writes; see
-    # `tuning.py` for why the gains are the one piece of state not kept in RAM.
+    # Where saved tuning profiles live. See `tuning.py` for why the gains are
+    # one piece of state not kept in RAM.
     tuning_store: str = ""
+    # Where saved /led_control effects live - the other one. See
+    # `lights_effects.py`.
+    light_effects_store: str = ""
     # NTRIP caster (rtk.py). Port 2101 is forwarded to this box for rtk.ligmax.no;
     # both the base station and the vessel dial out to it.
     rtk_enabled: bool = True
@@ -177,6 +180,10 @@ def load_config() -> Config:
         tuning_store=(
             os.environ.get("LIGMAX_TUNING_STORE", "").strip()
             or str(REPO_ROOT / "tuning-profiles.json")
+        ),
+        light_effects_store=(
+            os.environ.get("LIGMAX_LIGHT_EFFECTS_STORE", "").strip()
+            or str(REPO_ROOT / "light-effects.json")
         ),
         rtk_enabled=rtk_enabled,
         rtk_host=os.environ.get("LIGMAX_RTK_HOST", "0.0.0.0").strip() or "0.0.0.0",

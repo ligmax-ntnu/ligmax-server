@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -45,7 +44,7 @@ from flask import (
     url_for,
 )
 
-from . import auth, protocol, tuning
+from . import auth, lights_effects, protocol, tuning
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
@@ -70,15 +69,10 @@ DEPLOY_LINK_WINDOW = 20.0
 # oversized mission here rather than let it reach the vessel and fail there.
 MAX_MISSION_WAYPOINTS = 100
 
-# Mirrors ligmax-pi/nodes/io_manager/lights.py's NUM_LEDS/MAX_PATTERN_FRAMES/
-# MIN_HOLD_S/MAX_HOLD_S defaults - the /led_control validation below and the
-# vessel's own are meant to refuse the same payloads, so a malformed pattern
-# gets a 400 here instead of a silent "pattern rejected" three hops away.
-LIGHTS_NUM_LEDS = 101
-MAX_LIGHT_FRAMES = 60
-MIN_LIGHT_HOLD_MS = 20
-MAX_LIGHT_HOLD_MS = 60_000
-_HEX_COLOUR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
+# Mirrors ligmax-pi/nodes/io_manager/lights.py's MIN_FPS/MAX_FPS - a bad value
+# is a 400 here instead of a silent clamp on the vessel three hops away.
+MIN_LIGHTS_FPS = 1.0
+MAX_LIGHTS_FPS = 60.0
 
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
@@ -152,6 +146,15 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     "set_lights_pattern": {
         "label": "Send light pattern",
         "args": {"frames": "any"},
+        "log_level": "WARN",
+    },
+    # How often lights.py's worker redraws - the breathe and strobe as well as
+    # a loaded pattern. Clamped on the vessel (lights.py's MIN_FPS/MAX_FPS), so
+    # this is validated the same way here rather than left to be silently
+    # clamped three hops away.
+    "set_lights_fps": {
+        "label": "Lights refresh rate",
+        "args": {"fps": "float"},
         "log_level": "WARN",
     },
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
@@ -249,6 +252,12 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     if profiles.last_error:
         config.warnings.append(
             f"saved tuning profiles unavailable: {profiles.last_error}"
+        )
+    effects = lights_effects.EffectStore(config.light_effects_store)
+    app.config["LIGMAX_LIGHT_EFFECTS"] = effects
+    if effects.last_error:
+        config.warnings.append(
+            f"saved light effects unavailable: {effects.last_error}"
         )
 
     # The NTRIP caster is built here so its log lines land in the operator's log
@@ -589,12 +598,15 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     # `/led_control` lets an admin paint a solid colour, a per-pixel array, or a
     # looping multi-frame animation and push it to the hull ESP32 for real, over
     # the same `/api/command` path as everything else (`set_lights_mode` for the
-    # standard/custom switch, `set_lights_pattern` for the frames). Standalone
-    # like `/debug/lidar_viz`: one HTML file, no shared frontend modules.
+    # standard/custom switch, `set_lights_pattern` for the frames,
+    # `set_lights_fps` for the refresh rate). Standalone like `/debug/lidar_viz`:
+    # one HTML file, no shared frontend modules.
     #
-    # Deliberately not linked from `/` or `/control` - reached only by URL. The
-    # KILLED override in lights.py is the safety guarantee; keeping this off the
-    # pages a marshal or a teammate is actually looking at is the second one.
+    # Not on `/` or its nav - `/control` links here and this links back, since
+    # the two are used together, but neither puts it in front of someone who is
+    # just watching the overview. The KILLED override in lights.py is the safety
+    # guarantee; keeping this off the page a marshal is actually looking at is
+    # the second one.
 
     @app.get("/led_control")
     def led_control() -> Response:
@@ -605,6 +617,56 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response = make_response(send_from_directory(WEB_ROOT, "led_control.html"))
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    # Named presets, saved to disk - the one thing `/api/command` cannot do,
+    # since a command only ever reaches the vessel, never a file here. Mirrors
+    # `/api/tuning/profiles` below: GET behind the read gate like the page
+    # itself, save/delete behind the admin gate like sending a pattern is.
+
+    @app.get("/api/lights/effects")
+    def lights_effects_list() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify(
+            {
+                "effects": effects.list(),
+                "store": str(effects.path),
+                "store_error": effects.last_error,
+                "admin": is_admin(),
+            }
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/lights/effects")
+    def lights_effects_save() -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        payload = request.get_json(silent=True) or {}
+        saved, why = effects.save(
+            payload.get("name", ""), payload.get("frames"), by=_client_ip()
+        )
+        if why is not None:
+            return jsonify({"error": why}), 400  # type: ignore[return-value]
+        store.add_log(
+            "INFO",
+            f"light effect '{saved['name']}' saved with {saved['count']} "
+            f"frame(s) [{_client_ip()}]",
+            "gui.lights",
+        )
+        return jsonify({"ok": True, "effect": saved, "effects": effects.list()})
+
+    @app.delete("/api/lights/effects/<name>")
+    def lights_effects_delete(name: str) -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        ok, why = effects.delete(name)
+        if not ok:
+            return jsonify({"error": why}), 404  # type: ignore[return-value]
+        store.add_log(
+            "INFO", f"light effect '{name}' deleted [{_client_ip()}]", "gui.lights"
+        )
+        return jsonify({"ok": True, "effects": effects.list()})
 
     # -- telemetry in from the vessel ---------------------------------------
 
@@ -716,52 +778,22 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             cleaned["points"] = cleaned_points
 
         if name == "set_lights_pattern":
-            # Mirrors ligmax-pi/nodes/io_manager/lights.py's `_parse_pattern()` -
+            # lights_effects.validate_frames() mirrors
+            # ligmax-pi/nodes/io_manager/lights.py's `_parse_pattern()` -
             # deliberately, so a malformed pattern is a 400 here rather than a
             # "pattern rejected" the operator has to go find in the vessel log.
-            frames = cleaned.get("frames")
-            if not isinstance(frames, list) or not frames:
-                return jsonify(  # type: ignore[return-value]
-                    {"error": "'frames' must be a non-empty list"}
-                ), 400
-            if len(frames) > MAX_LIGHT_FRAMES:
-                return jsonify(  # type: ignore[return-value]
-                    {"error": f"a pattern may have at most {MAX_LIGHT_FRAMES} frames"}
-                ), 400
-            cleaned_frames: list[dict[str, Any]] = []
-            for i, entry in enumerate(frames):
-                if not isinstance(entry, dict):
-                    return jsonify({"error": f"frame {i} is not an object"}), 400  # type: ignore[return-value]
-                try:
-                    hold_ms = float(entry.get("hold_ms"))
-                except (TypeError, ValueError):
-                    return jsonify({"error": f"frame {i} has a bad hold_ms"}), 400  # type: ignore[return-value]
-                if not (MIN_LIGHT_HOLD_MS <= hold_ms <= MAX_LIGHT_HOLD_MS):
-                    return jsonify(  # type: ignore[return-value]
-                        {"error": f"frame {i} hold_ms must be between "
-                                  f"{MIN_LIGHT_HOLD_MS} and {MAX_LIGHT_HOLD_MS}"}
-                    ), 400
-                pixels = entry.get("pixels")
-                if isinstance(pixels, str):
-                    swatch = [pixels]
-                elif isinstance(pixels, list):
-                    if len(pixels) != LIGHTS_NUM_LEDS:
-                        return jsonify(  # type: ignore[return-value]
-                            {"error": f"frame {i} has {len(pixels)} pixels, "
-                                      f"want {LIGHTS_NUM_LEDS}"}
-                        ), 400
-                    swatch = pixels
-                else:
-                    return jsonify(  # type: ignore[return-value]
-                        {"error": f"frame {i} pixels must be a hex string or a list"}
-                    ), 400
-                for value in swatch:
-                    if not _HEX_COLOUR_RE.match(str(value)):
-                        return jsonify(  # type: ignore[return-value]
-                            {"error": f"frame {i} has a bad colour {value!r}"}
-                        ), 400
-                cleaned_frames.append({"pixels": pixels, "hold_ms": hold_ms})
+            # The same function backs /api/lights/effects' save path, so a
+            # saved effect and a live-sent one are held to one rule, not two.
+            cleaned_frames, why = lights_effects.validate_frames(cleaned.get("frames"))
+            if why is not None:
+                return jsonify({"error": why}), 400  # type: ignore[return-value]
             cleaned["frames"] = cleaned_frames
+
+        if name == "set_lights_fps":
+            if not (MIN_LIGHTS_FPS <= cleaned["fps"] <= MAX_LIGHTS_FPS):
+                return jsonify(  # type: ignore[return-value]
+                    {"error": f"'fps' must be between {MIN_LIGHTS_FPS:g} and {MAX_LIGHTS_FPS:g}"}
+                ), 400
 
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
         level = spec.get("log_level") or ("ERROR" if spec.get("danger") else "INFO")

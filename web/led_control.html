@@ -8,11 +8,16 @@
   multi-frame animation - and push them to the real hull ESP32 for testing.
 
   Deliberately off to the side of the ordinary dashboard (see server.py's
-  comment by this route): reached only by URL, never linked from `/` or
-  `/control`. Standalone like `/debug/lidar_viz` - one file, no shared
-  frontend modules - and it needed no new backend reads to get there: this
-  just polls the existing `/api/session` and `/api/snapshot`, and sends
-  through the existing `/api/command` (`set_lights_mode`, `set_lights_pattern`).
+  comment by this route): still not on `/` or its nav, but `/control` links
+  here and this links back, since the two are used together in practice.
+  Standalone like `/debug/lidar_viz` - one file, no shared frontend modules -
+  and most of it needed no new backend reads: it polls the existing
+  `/api/session` and `/api/snapshot`, and sends through the existing
+  `/api/command` (`set_lights_mode`, `set_lights_pattern`, `set_lights_fps`).
+  Saving and loading named effects is the one addition that could not ride
+  those - `/api/lights/effects` is this page's own, the same way
+  `/api/tuning/profiles` is `/control`'s (ligmax_gui/tuning.py): the only
+  other thing in ligmax-server that writes to disk.
 
   The strip is drawn as 101 LEDs in four groups - 28, 23, 22, 28 - in the same
   order `lights.py`'s DATA/COL frames use (wire index 0..100). The last two
@@ -64,6 +69,8 @@
   .pill.bad { color: var(--bad); border-color: rgba(226, 69, 63, .4); }
   .pill.warn { color: var(--warn); border-color: rgba(240, 178, 60, .4); }
   .pill.accent { color: var(--accent); border-color: rgba(127, 212, 255, .4); }
+  a.pill { text-decoration: none; }
+  a.pill:hover { border-color: var(--accent); }
 
   .switch { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; }
   .switch input { display: none; }
@@ -137,6 +144,7 @@
     border-radius: 4px; padding: 2px 4px; font-size: 11px; text-align: right;
   }
   .ms-label { font-size: 10px; color: var(--dim); }
+  .fps-input { width: 70px; font-size: 13px; padding: 5px 6px; }
 
   .send-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   #send-status.ok { color: var(--ok); }
@@ -146,6 +154,7 @@
 
 <header id="bar">
   <div class="left">
+    <a href="/control" class="pill" title="Back to the control &amp; data page">&larr; Control</a>
     <h1>led_control</h1>
     <span id="link-pill" class="pill">connecting…</span>
     <span id="role-pill" class="pill">read-only</span>
@@ -208,6 +217,37 @@
   </section>
 
   <section class="card">
+    <h2>Saved effects</h2>
+    <div class="toolbar">
+      <select id="effects-select" class="admin-only"></select>
+      <button id="btn-effect-load" class="admin-only">Load</button>
+      <button id="btn-effect-save" class="admin-only">Save current as…</button>
+      <button id="btn-effect-delete" class="admin-only">Delete</button>
+    </div>
+    <p class="hint">
+      Saved on the ground station, not the boat - loading a saved effect
+      replaces the frames above in this editor but changes nothing on the
+      hull until Send below is pressed.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Refresh rate</h2>
+    <div class="toolbar">
+      <input type="number" id="fps-input" class="hold-input fps-input admin-only" min="1" max="60" step="1" value="30">
+      <span class="ms-label">fps</span>
+      <button id="btn-fps-apply" class="admin-only">Set</button>
+      <span id="fps-current" class="pill">current: —</span>
+    </div>
+    <p class="hint">
+      How often the hull worker redraws - the breathe and strobe as well as
+      any pattern loaded above. 1-60, defaults to 30 and resets to that on a
+      vessel restart. Independent of a frame's own hold time: this changes
+      how smoothly the strip is repainted, not how long a frame is shown.
+    </p>
+  </section>
+
+  <section class="card">
     <h2>Send</h2>
     <div class="send-row">
       <button id="btn-send" class="admin-only primary">Send pattern to boat</button>
@@ -229,8 +269,8 @@
   // Wire index order, per lights.py/lights_esp.ino - see the top-of-file comment.
   const GROUPS = [28, 23, 22, 28];
   const NUM_LEDS = GROUPS.reduce((a, b) => a + b, 0); // 101 - must match
-                                                       // ligmax-server's LIGHTS_NUM_LEDS
-                                                       // and lights.py's NUM_LEDS default
+                                                       // ligmax_gui/lights_effects.py's
+                                                       // NUM_LEDS and lights.py's own default
   const OFF = '#000000';
   const SWATCHES = ['#ff0000', '#ff8800', '#ffff00', '#00ff00', '#00ffff', '#0066ff', '#aa00ff', '#ffffff', '#000000'];
   const DEFAULT_HOLD_MS = 500;
@@ -248,12 +288,17 @@
   const readonlyBanner = $('readonly-banner');
   const sendStatus = $('send-status');
   const loopTotal = $('loop-total');
+  const effectsSelect = $('effects-select');
+  const fpsInput = $('fps-input');
+  const fpsCurrent = $('fps-current');
 
   /* --- state ------------------------------------------------------------ */
 
   let admin = false;
   let modeRequestPending = false;
+  let fpsRequestPending = false;
   let pendingCommandId = null;
+  let effects = [];
 
   let frames = [{ pixels: Array(NUM_LEDS).fill(OFF), holdMs: DEFAULT_HOLD_MS }];
   let activeFrame = 0;
@@ -512,6 +557,26 @@
 
   function isSolid(pixels) { return pixels.every((p) => p === pixels[0]); }
   function hexBody(hex) { return hex.replace('#', '').toUpperCase(); }
+  function cssColour(hex) { return '#' + String(hex).replace('#', '').toUpperCase(); }
+
+  // The shape /api/command's set_lights_pattern and /api/lights/effects both
+  // accept - same helper for the live-send path and the save-to-disk path,
+  // so the two can never drift into sending different shapes.
+  function toWireFrames(editorFrames) {
+    return editorFrames.map((f) => ({
+      pixels: isSolid(f.pixels) ? hexBody(f.pixels[0]) : f.pixels.map(hexBody),
+      hold_ms: f.holdMs,
+    }));
+  }
+
+  function fromWireFrames(wireFrames) {
+    return wireFrames.map((f) => ({
+      pixels: Array.isArray(f.pixels)
+        ? f.pixels.map(cssColour)
+        : Array(NUM_LEDS).fill(cssColour(f.pixels)),
+      holdMs: clampHold(f.hold_ms),
+    }));
+  }
 
   async function postCommand(name, args) {
     const res = await fetch('/api/command', {
@@ -525,6 +590,17 @@
     return body;
   }
 
+  async function apiJson(url, options = {}) {
+    const res = await fetch(url, {
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.ok === false) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
   $('btn-send').addEventListener('click', async () => {
     if (!admin) return;
     stopPreview();
@@ -533,11 +609,7 @@
     sendStatus.textContent = 'sending…';
     sendStatus.className = 'muted';
     try {
-      const wireFrames = frames.map((f) => ({
-        pixels: isSolid(f.pixels) ? hexBody(f.pixels[0]) : f.pixels.map(hexBody),
-        hold_ms: f.holdMs,
-      }));
-      const body = await postCommand('set_lights_pattern', { frames: wireFrames });
+      const body = await postCommand('set_lights_pattern', { frames: toWireFrames(frames) });
       pendingCommandId = body.command.id;
       sendStatus.textContent = `sent — command #${body.command.id}`;
       sendStatus.className = 'muted';
@@ -563,6 +635,112 @@
     } finally {
       modeToggle.disabled = !admin;
       modeRequestPending = false;
+    }
+  });
+
+  /* --- refresh rate ----------------------------------------------------- */
+
+  $('btn-fps-apply').addEventListener('click', async () => {
+    if (!admin) return;
+    const value = Number(fpsInput.value);
+    if (!Number.isFinite(value)) return;
+    const btn = $('btn-fps-apply');
+    btn.disabled = true;
+    fpsRequestPending = true;
+    sendStatus.textContent = 'setting fps…';
+    sendStatus.className = 'muted';
+    try {
+      const body = await postCommand('set_lights_fps', { fps: value });
+      sendStatus.textContent = `fps set — command #${body.command.id}`;
+      sendStatus.className = 'muted';
+    } catch (err) {
+      sendStatus.textContent = 'fps failed: ' + (err.message || err);
+      sendStatus.className = 'bad';
+    } finally {
+      btn.disabled = !admin;
+      fpsRequestPending = false;
+    }
+  });
+
+  /* --- saved effects ------------------------------------------------------ */
+
+  function buildEffectsSelect(selectName) {
+    const chosen = selectName || effectsSelect.value;
+    effectsSelect.innerHTML = '';
+    if (!effects.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'nothing saved yet';
+      effectsSelect.appendChild(opt);
+      effectsSelect.disabled = true;
+      return;
+    }
+    effectsSelect.disabled = !admin;
+    for (const effect of effects) {
+      const opt = document.createElement('option');
+      opt.value = effect.name;
+      opt.textContent = `${effect.name} · ${effect.count} frame${effect.count === 1 ? '' : 's'}`;
+      effectsSelect.appendChild(opt);
+    }
+    if (chosen && effects.some((e) => e.name === chosen)) effectsSelect.value = chosen;
+  }
+
+  async function fetchEffects() {
+    try {
+      const res = await fetch('/api/lights/effects', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const body = await res.json();
+      effects = body.effects || [];
+      buildEffectsSelect();
+    } catch (err) { /* leave the last known list in place */ }
+  }
+
+  $('btn-effect-load').addEventListener('click', () => {
+    if (!admin) return;
+    const effect = effects.find((e) => e.name === effectsSelect.value);
+    if (!effect) return;
+    stopPreview();
+    frames = fromWireFrames(effect.frames);
+    activeFrame = 0;
+    buildFilmstrip();
+    renderActiveFrame();
+    sendStatus.textContent = `loaded '${effect.name}' into the editor - not sent yet`;
+    sendStatus.className = 'muted';
+  });
+
+  $('btn-effect-save').addEventListener('click', async () => {
+    if (!admin) return;
+    const name = window.prompt('Save the pattern in the editor under what name?', '');
+    if (!name) return;
+    try {
+      const body = await apiJson('/api/lights/effects', {
+        method: 'POST',
+        body: JSON.stringify({ name, frames: toWireFrames(frames) }),
+      });
+      effects = body.effects || effects;
+      buildEffectsSelect(body.effect.name);
+      sendStatus.textContent = `saved '${body.effect.name}' (${body.effect.count} frame(s))`;
+      sendStatus.className = 'ok';
+    } catch (err) {
+      sendStatus.textContent = 'save failed: ' + (err.message || err);
+      sendStatus.className = 'bad';
+    }
+  });
+
+  $('btn-effect-delete').addEventListener('click', async () => {
+    if (!admin) return;
+    const name = effectsSelect.value;
+    if (!name) return;
+    if (!window.confirm(`Delete the saved effect '${name}'? This cannot be undone.`)) return;
+    try {
+      const body = await apiJson(`/api/lights/effects/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      effects = body.effects || [];
+      buildEffectsSelect();
+      sendStatus.textContent = `deleted '${name}'`;
+      sendStatus.className = 'muted';
+    } catch (err) {
+      sendStatus.textContent = 'delete failed: ' + (err.message || err);
+      sendStatus.className = 'bad';
     }
   });
 
@@ -615,6 +793,15 @@
     $('side-standard').classList.toggle('on', !modeToggle.checked);
     $('side-custom').classList.toggle('on', modeToggle.checked);
 
+    if (typeof lights.fps === 'number') {
+      fpsCurrent.textContent = `current: ${lights.fps % 1 ? lights.fps.toFixed(1) : lights.fps} fps`;
+      if (!fpsRequestPending && document.activeElement !== fpsInput) {
+        fpsInput.value = String(Math.round(lights.fps));
+      }
+    } else {
+      fpsCurrent.textContent = 'current: unknown';
+    }
+
     if (pendingCommandId) {
       const cmd = (snapshot.commands || []).find((c) => c.id === pendingCommandId);
       if (cmd && cmd.status !== 'queued' && cmd.status !== 'delivered') {
@@ -655,7 +842,9 @@
   applyAdmin(false); // safe default until /api/session says otherwise
   pollSession();
   pollSnapshot();
+  fetchEffects();
   setInterval(pollSession, 5000);
   setInterval(pollSnapshot, 1000);
+  setInterval(fetchEffects, 15000);
 })();
 </script>

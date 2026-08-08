@@ -25,11 +25,12 @@ load the gains from the dashboard":
    otherwise throw away a bench-tuned set that exists nowhere else. Hence a copy
    on shore, and one click to put it back.
 
-   This is the only thing in `ligmax-server` that writes to disk. Everything
-   else is RAM-only and loses its state on restart, which is a documented and
-   deliberate trade for the log ring and the command audit. It is the wrong
-   trade for the gains: they are the one piece of state here that is expensive
-   to recreate and cheap to store.
+   This was the only thing in `ligmax-server` that wrote to disk until
+   `lights_effects.EffectStore` joined it (same shape, for `/led_control`'s
+   saved patterns). Everything else is RAM-only and loses its state on
+   restart, which is a documented and deliberate trade for the log ring and
+   the command audit. It is the wrong trade for the gains: they are a piece of
+   state here that is expensive to recreate and cheap to store.
 """
 
 from __future__ import annotations
