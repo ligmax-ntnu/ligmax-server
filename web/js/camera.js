@@ -267,7 +267,11 @@ export class CameraPanel {
 
     if (toggle) {
       const on = Boolean(stream?.enabled);
-      toggle.textContent = on ? 'Stop sending video' : 'Send video from the boat';
+      toggle.textContent = this.admin
+        ? on
+          ? 'Stop sending video'
+          : 'Send video from the boat'
+        : 'You need admin privileges to start camera stream';
       toggle.classList.toggle('is-on', on);
       toggle.setAttribute('aria-pressed', String(on));
     }

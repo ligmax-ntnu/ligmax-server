@@ -1602,16 +1602,13 @@
 }
 
 /* The two cameras belong side by side: they aim ±15° apart and the operator is
-   comparing them, so stacking makes one scroll away.
-
-   The floor has to be small enough that two of them fit the column this card
-   actually lives in, which is the 23rem `.overview-side` (21rem below 1400px)
-   minus 2rem of card padding — so 21rem of content, 19rem at the narrower
-   breakpoint. `minmax(13rem, …)` needed 26.5rem for two and therefore ALWAYS
-   collapsed to one; 8.5rem fits two at both widths and cannot fit three. */
+   comparing them, so stacking makes one scroll away. Fixed at two columns
+   rather than auto-fit — auto-fit collapses to one column once the tiles'
+   minimum width no longer fits the container, which is exactly the "over and
+   under" layout this is meant to avoid. */
 .cam-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
