@@ -79,8 +79,6 @@ DEFAULT_REPOS = (
     "ligmax-server",
     "ligmax-pi",
     "ligmax-edge",
-    "ligmax-ai",
-    "ligmax-subsystems",
 )
 
 RESULTS = ("ok", "no-change", "refused", "failed")
