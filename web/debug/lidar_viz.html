@@ -329,9 +329,25 @@
       `  pts ${lidar.front_points ?? 0}` +
       `  coloured ${front.sweep_coloured ?? '—'}/${front.sweep_points ?? '—'}` +
       `  ${num(front.sweep_hz, 1, ' Hz')}` +
-      `  skew ${(front.skew_ms ?? []).map((s) => num(s, 0)).join('/') || '—'} ms` +
+      `  age ${num(front.sweep_age_s, 2, ' s')}` +
       `  sweeps ${front.sweeps ?? 0}  frames ${front.frames ?? 0}`
     );
+
+    // The two cross-machine clock figures, on their own line because they
+    // explain two different faults and neither is a Pi fault. `offset` is the
+    // Pi-to-Jetson wall-clock gap; `skew` is the Jetson's own sweep-to-frame
+    // capture gap, which is what decides whether returns can be coloured.
+    if (front.connected) {
+      const offset = front.clock_offset_s;
+      const skew = (front.skew_ms ?? []).find((s) => typeof s === 'number');
+      rows.push(
+        `<span class="k">clocks</span> Jetson offset ` +
+        span(num(offset, 2, ' s'), Math.abs(offset ?? 0) > 1 ? 'warn' : 'k') +
+        `  fusion skew ` +
+        span((front.skew_ms ?? []).map((s) => num(s, 0)).join('/') || '—',
+             Math.abs(skew ?? 0) > 1000 ? 'warn' : 'k') + ` ms`
+      );
+    }
 
     rows.push(
       `<b>aft</b>     ${span(aft.healthy ? 'up' : 'DOWN', aft.healthy ? 'ok' : 'bad')}` +
@@ -375,6 +391,22 @@
     }
     if (front.connected && !front.sweeps) {
       out.push('Jetson connected but sending no sweeps — start it with LIDAR=1 ./run.sh');
+    }
+    // Sweeps arriving and none reaching the plot is the one failure that looks
+    // like a working link. It is always either staleness or a throw in the
+    // geometry, and the HUD now carries both numbers.
+    if (front.sweeps && !payload.lidar?.front_points) {
+      out.push('front sweeps arrive but none reach the plot — check `age` above ' +
+               '(stale) and `errors` below (the conversion threw)');
+    }
+    if (payload.lidar?.errors) {
+      out.push(`errors ${payload.lidar.errors} — a scan failed to convert; see the Pi's log`);
+    }
+    const skew = (front.skew_ms ?? []).find((s) => typeof s === 'number');
+    if (Math.abs(skew ?? 0) > 1000) {
+      out.push(`front returns cannot be coloured: the Jetson's sweep-to-frame skew is ` +
+               `${(skew / 1000).toFixed(0)} s, far past --lidar-max-skew, so fusion marks ` +
+               `every point cam = -1. A ligmax-edge capture-clock fault, not a Pi one.`);
     }
     if (front.last_error) out.push(`front: ${front.last_error}`);
     if (aft.last_error && !aft.healthy) out.push(`aft: ${aft.last_error}`);
