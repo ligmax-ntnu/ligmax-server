@@ -118,6 +118,13 @@ class CameraRelay:
         self._bytes_received = 0
         self._rejected = 0
         self._last_poll_at: float | None = None
+        # A poll that arrived and was turned away. Kept apart from
+        # `_last_poll_at` because the two produce the same empty panel and have
+        # opposite causes: nothing asking (the Jetson is down) versus something
+        # asking with the wrong key (the Jetson is up and misconfigured).
+        self._refused = 0
+        self._last_refusal_at: float | None = None
+        self._last_refusal: str | None = None
         self._enabled_by: str | None = None
         self._enabled_at: float | None = None
         # Frame rate measured on arrival, per camera, over a short window.
@@ -215,6 +222,13 @@ class CameraRelay:
                     if self._last_poll_at is not None
                     else None
                 ),
+                "refused": self._refused,
+                "last_refusal": self._last_refusal,
+                "last_refusal_age": (
+                    round(now - self._last_refusal_at, 1)
+                    if self._last_refusal_at is not None
+                    else None
+                ),
                 "enabled_by": self._enabled_by,
                 "limits": LIMITS,
             }
@@ -231,6 +245,21 @@ class CameraRelay:
         with self._lock:
             self._last_poll_at = time.time()
             return {**self._stream, "config_version": self._config_version}
+
+    def note_refused(self, what: str) -> None:
+        """Something claiming to be the boat was turned away at the door.
+
+        Called from the auth branches in `server.py`, before `poll()` is
+        reached - which is the whole point: an unauthenticated poll never
+        stamps `last_poll_at`, so without this the panel says "never asked"
+        about a Jetson that is asking several times a minute with the wrong
+        key. That sends whoever is debugging to the board instead of to
+        `/etc/ligmax/node.env`.
+        """
+        with self._lock:
+            self._refused += 1
+            self._last_refusal_at = time.time()
+            self._last_refusal = what
 
     def configure(self, changes: dict[str, Any], by: str = "operator") -> dict[str, Any]:
         """Apply an operator's changes and return the new config.

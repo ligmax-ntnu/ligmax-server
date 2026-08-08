@@ -313,7 +313,24 @@ export class CameraPanel {
   /** One line saying which of the several "no picture" cases this is. */
   _statusLine() {
     if (!this.state) return 'Camera state unavailable — the server did not answer.';
-    const { stream, cameras, last_poll_age: pollAge, frames_received: frames } = this.state;
+    const {
+      stream,
+      cameras,
+      last_poll_age: pollAge,
+      frames_received: frames,
+      refused,
+      last_refusal: refusal,
+      last_refusal_age: refusalAge,
+    } = this.state;
+
+    // Something is asking and being turned away. Say so before anything else:
+    // every other line below would blame the Jetson for being silent, and it is
+    // not silent — it is unauthenticated. Almost always LIGMAX_BOAT_KEY missing
+    // from /etc/ligmax/node.env on ligmax-json.local.
+    const refusedRecently = refused > 0 && refusalAge !== null && refusalAge < 60;
+    if (refusedRecently) {
+      return `Refused: ${refusal || 'unauthorised'} (${refused} in this session, last ${fmt.ago(refusalAge)}). The boat is reaching the dashboard but its key is wrong — check LIGMAX_BOAT_KEY on ligmax-json.local.`;
+    }
 
     if (!stream.enabled) {
       return this.admin

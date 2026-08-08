@@ -385,6 +385,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     def camera_ingest() -> Response:
         if not boat_authorised():
             store.note_rejected()
+            cameras.note_refused("frame POST, wrong or missing boat key")
             return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
 
         # Nothing is stored while the stream is off, so a sender that ignores the
@@ -425,6 +426,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     def camera_config() -> Response:
         """What the Jetson should be sending. Polled outbound, like /pending."""
         if not boat_authorised() and not node_authorised():
+            # Recorded, because this is the failure that looks like nothing:
+            # the poll never reaches poll(), so the panel would otherwise report
+            # a Jetson that has "never asked" while it is asking every 5 s.
+            cameras.note_refused("config poll, wrong or missing boat key")
             return jsonify({"error": "boat key required"}), 403  # type: ignore[return-value]
         response = jsonify(cameras.poll())
         response.headers["Cache-Control"] = "no-store"
