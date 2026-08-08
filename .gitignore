@@ -9,3 +9,10 @@ recordings/
 caddy.exe
 Caddyfile
 keys/
+
+# Saved stabilisation tuning (ligmax_gui/tuning.py). Bench-tuned numbers for one
+# particular boat, not source: committing them would put one flight controller's
+# gains in every checkout, and a pull would overwrite whatever the last session
+# measured. Back it up with the rest of the ground station's state.
+tuning-profiles.json
+tuning-profiles.json.tmp

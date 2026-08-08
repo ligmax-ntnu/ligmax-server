@@ -184,6 +184,45 @@
               drops propulsion power for the length of the restart.
             </p>
           </section>
+
+          <!-- --------------------------------------------------- tuning -->
+          <!-- The gains and trims of the two stabilisation loops. These are
+               ArduPilot parameters on the flight controller, not dashboard
+               settings: the vessel reads them continuously and writes what is
+               changed here straight into the autopilot's own storage, so a tune
+               survives every reboot in the chain. Full width because it is a
+               bench, not a sidebar widget. -->
+          <section class="card card--tuning" id="tuning-card">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">Stabilisation</span>
+                <h2 class="card-title">Roll &amp; pitch tuning</h2>
+              </div>
+              <div class="tune-tools">
+                <button class="chip" id="tuning-reload" type="button"
+                        title="Ask the vessel to re-read every parameter off the flight controller. It does this on every connect and once a minute anyway — press it after someone has been editing parameters in Mission Planner.">
+                  Re-read from the autopilot
+                </button>
+              </div>
+            </header>
+
+            <div class="tune-groups" id="tuning-groups"></div>
+            <div class="tune-profiles" id="tuning-profiles"></div>
+
+            <p class="card-note card-note--tight tune-status" id="tuning-status"></p>
+
+            <p class="card-note card-note--tight">
+              Every field is a parameter on the Pixhawk, read and written by the
+              vessel over MAVLink. The column on the right is what the flight
+              controller says it has; the field is what will be sent. Saving is
+              ArduPilot's own set-and-save, so an acked value is in the autopilot's
+              storage and survives a reboot of the Pixhawk, the Pi and this
+              dashboard — which also means a <strong>ride-height trim keeps the
+              amas creeping until it is set back to zero</strong>. Both trims add
+              to the pilot's knobs rather than overriding them, so the transmitter
+              keeps its authority while this page has its own.
+            </p>
+          </section>
         </div>
 
         <!-- ----------------------------------------------------- lower -->

@@ -128,6 +128,34 @@ LIGHT_COLOURS = {
     "STANDBY": "white",
 }
 
+# The stabilisation tuning, as the vessel reads it off the flight controller
+# (`ligmax-pi/nodes/io_manager/tuning.py`). Standing in for real parameters, so
+# the tuning panel on /control can be driven with no boat: `set_param` writes here
+# and the value comes straight back up in `telemetry.tuning.values`, which is
+# exactly the round trip the real one makes through ArduPilot's storage.
+#
+# The numbers are plausible, not measured - nothing on this vessel has been tuned
+# yet, and the two scripts ship with every gain at zero on purpose.
+TUNING_DEFAULTS = {
+    "SCR_USER1": 18.0,   # roll Kp, us/deg
+    "SCR_USER2": 4.5,    # roll Kd
+    "SCR_USER3": 0.0,    # roll trim knob channel, 0 = off
+    "SCR_USER4": 0.0,    # roll trim knob range, deg
+    "SCR_USER5": 0.0,    # roll trim from the dashboard, deg
+    "SCR_USER6": 0.0,    # ride-height trim from the dashboard, us
+    "BSLD_ENABLE": 1.0,
+    "BSLD_KP": 0.045,
+    "BSLD_KI": 0.008,
+    "BSLD_KD": 0.012,
+    "BSLD_IMAX": 0.30,
+    "BSLD_TRIM": 0.12,
+    "BSLD_LIMIT": 0.95,
+    "BSLD_SIGN": 1.0,
+    "BSLD_TRM_CH": 0.0,
+    "BSLD_TRM_DEG": 0.0,
+    "BSLD_TRM_OFS": 0.0,
+}
+
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -161,6 +189,12 @@ class Sim:
         # `lose_control` sets this, so the OUT_OF_CONTROL status and its red
         # strobe can be exercised from the dashboard's raw-command box.
         self.lost_until = 0.0
+        # Stands in for the flight controller's parameter storage. `set_param`
+        # writes here and `telemetry.tuning` reads it back, so the panel's whole
+        # save-and-reload cycle works with no vessel and no Pixhawk.
+        self.tuning = dict(TUNING_DEFAULTS)
+        self.tuning_writes = 0
+        self.last_param_write = None
 
     # -- motion -------------------------------------------------------------
 
@@ -434,14 +468,23 @@ class Sim:
 
         # Pitch trim: the pack slides fore and aft to cancel pitch, so the rail
         # position tracks the pitch error rather than being an independent wave.
-        rail_mm = clamp(20.0 - pitch * 18.0, RAIL_MIN_MM, RAIL_MAX_MM)
+        # BSLD_TRM_OFS moves the *target*, so a trim set from the dashboard shifts
+        # where the pack settles - which is what makes the panel testable here.
+        pitch_error = pitch - self.tuning.get("BSLD_TRM_OFS", 0.0)
+        rail_mm = clamp(20.0 - pitch_error * 18.0, RAIL_MIN_MM, RAIL_MAX_MM)
 
         # Roll trim. `amas.lua` runs a PD controller on roll and writes the two
         # servo outputs anti-symmetrically, then adds a common-mode ride-height
         # offset. Reproduced here so the panel shows the shape of the real thing:
         # both channels move together for height and apart for roll.
-        roll_us = clamp(-roll * 42.0, -500.0, 500.0)
-        height_us = 60.0 + 40.0 * math.sin(now * 0.19)
+        # Roll error against the trim the dashboard has set, and the standing
+        # height offset added on top - the same sum amas.lua makes, so setting
+        # either trim from the panel visibly moves these two figures.
+        roll_us = clamp(-(roll - self.tuning.get("SCR_USER5", 0.0)) * 42.0, -500.0, 500.0)
+        height_us = clamp(
+            60.0 + 40.0 * math.sin(now * 0.19) + self.tuning.get("SCR_USER6", 0.0),
+            -500.0, 500.0,
+        )
         port_us = clamp(1500.0 + roll_us + height_us, 1000.0, 2000.0)
         starboard_us = clamp(1500.0 - roll_us + height_us, 1000.0, 2000.0)
         saturated = port_us in (1000.0, 2000.0) or starboard_us in (1000.0, 2000.0)
@@ -575,6 +618,22 @@ class Sim:
                 "loop_hz": round(19.4 + random.gauss(0, 0.4), 2),
                 "armed": self.armed,
             },
+            # The gains and trims themselves. Shape from
+            # `ligmax-pi/nodes/io_manager/tuning.py:Tuning.telemetry()`: the
+            # panel needs `known`/`of` and `slider_script` as much as the values,
+            # because "still reading" and "the Lua script never ran" are the two
+            # states it has to be able to say out loud.
+            "tuning": {
+                "values": dict(self.tuning),
+                "known": len(self.tuning),
+                "of": len(TUNING_DEFAULTS),
+                "loading": False,
+                "queued": 0,
+                "writes": self.tuning_writes,
+                "write_failures": 0,
+                "slider_script": True,
+                **({"last_write": self.last_param_write} if self.last_param_write else {}),
+            },
             "bilge": {"pump_1": False, "pump_2": False, "water_detected": False},
         }
 
@@ -619,6 +678,27 @@ class Sim:
         if name == "recentre_origin":
             self.x, self.y = 0.0, 0.0
             return "acked", "grid origin re-zeroed"
+        if name == "set_param":
+            # The server has already checked the name and the range, so anything
+            # arriving here is legal. The real vessel refuses a read-only
+            # parameter too, and so does this - it is the one refusal the panel
+            # has no other way to show.
+            key = str(args.get("name", "")).strip().upper()
+            if key not in self.tuning:
+                return "failed", f"'{key}' is not a parameter this vessel has"
+            if key == "BSLD_SIGN":
+                return "failed", "BSLD_SIGN is set on the bench, not from shore"
+            try:
+                value = float(args.get("value"))
+            except (TypeError, ValueError):
+                return "failed", f"{key} wants a number"
+            self.tuning[key] = value
+            self.tuning_writes += 1
+            self.last_param_write = f"{key} = {value:g}, saved on the autopilot"
+            return "acked", self.last_param_write
+        if name == "get_params":
+            # Nothing to re-read from - the dict *is* the flight controller here.
+            return "acked", f"re-read {len(self.tuning)} parameters"
         if name == "raw":
             # One hook worth having: `{"lose_control": 20}` fakes losing control
             # for that many seconds, which is the only way to see the status

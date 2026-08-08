@@ -30,6 +30,7 @@ import {
   updateHeader,
 } from './shell.js';
 import { KpiStrip, TelemetryPanels } from './telemetry.js';
+import { TuningPanel } from './tuning.js';
 
 async function boot() {
   const { store, admin, prefs } = await bootShell();
@@ -105,6 +106,25 @@ async function boot() {
     { notify, canSend: admin }
   );
 
+  /* --- stabilisation tuning ----------------------------------------- */
+
+  // Rendered for everyone: what the boat is tuned to is a measurement, and a
+  // read-only viewer should be able to read it. The fields are disabled without
+  // an admin session, and /api/command refuses `set_param` regardless.
+  const tuningPanel = new TuningPanel(
+    {
+      groups: $('tuning-groups'),
+      profiles: $('tuning-profiles'),
+      status: $('tuning-status'),
+    },
+    store,
+    { notify, canSend: admin }
+  );
+  const tuningReload = $('tuning-reload');
+  tuningReload.disabled = !admin;
+  tuningReload.addEventListener('click', () => tuningPanel.reload());
+  tuningPanel.start();
+
   /* --- deployments -------------------------------------------------- */
 
   let deployPanel = null;
@@ -120,6 +140,7 @@ async function boot() {
     kpiStrip.update();
     telemetryPanels.update();
     commandPanel.syncModes();
+    tuningPanel.update();
     updateHeader(store);
   });
 
@@ -130,7 +151,13 @@ async function boot() {
     logConsole.rebuild();
     renderCommandHistory($('cmd-list'), store.commands);
   });
-  store.on('commands', (commands) => renderCommandHistory($('cmd-list'), commands));
+  store.on('commands', (commands) => {
+    renderCommandHistory($('cmd-list'), commands);
+    // The tuning panel reads a `set_param`'s fate out of the audit list, so it
+    // has to see command updates as well as telemetry ones - the vessel's refusal
+    // arrives as an ack, not as a state change.
+    tuningPanel.update();
+  });
 
   renderCommandHistory($('cmd-list'), []);
 
@@ -145,6 +172,7 @@ async function boot() {
     telemetryPanels,
     deployPanel,
     cameraPanel,
+    tuningPanel,
   };
 
   startHeartbeat(store, () => kpiStrip.update());

@@ -183,6 +183,11 @@ const GROUPS = [
   { key: 'bilge', eyebrow: 'Safety', title: 'Bilge & hull' },
 ];
 
+// Telemetry blocks that already have a panel of their own, so the generic
+// renderer must not draw them a second time. `tuning` is a form, not a set of
+// readings: seventeen numbers with an editable field each (web/js/tuning.js).
+const OWNED_ELSEWHERE = new Set(['tuning']);
+
 const SPARK_INTERVAL = 450; // ms; text updates every frame, charts less often
 
 function levelFor(spec, value) {
@@ -449,7 +454,13 @@ export class TelemetryPanels {
     // has started publishing.
     const known = new Set(GROUPS.map((group) => group.key));
     const extras = Object.keys(telemetry)
-      .filter((key) => !known.has(key) && telemetry[key] && typeof telemetry[key] === 'object')
+      .filter(
+        (key) =>
+          !known.has(key) &&
+          !OWNED_ELSEWHERE.has(key) &&
+          telemetry[key] &&
+          typeof telemetry[key] === 'object'
+      )
       .sort();
     const groups = [
       ...GROUPS,

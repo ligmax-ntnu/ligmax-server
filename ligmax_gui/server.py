@@ -44,7 +44,7 @@ from flask import (
     url_for,
 )
 
-from . import auth, protocol
+from . import auth, protocol, tuning
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
@@ -71,6 +71,10 @@ MAX_MISSION_WAYPOINTS = 100
 
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
+#
+# `danger` logs the command at ERROR and makes the UI shout; `log_level` overrides
+# the audit level on its own, for the commands that are worth finding in the log
+# afterwards without being emergencies.
 COMMAND_SPECS: dict[str, dict[str, Any]] = {
     "set_mode": {"label": "Set mode", "args": {"mode": "str"}},
     "estop": {"label": "Emergency stop", "args": {}, "danger": True},
@@ -105,6 +109,23 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     "clear_waypoints": {"label": "Clear waypoints", "args": {}},
     "set_speed_limit": {"label": "Speed limit", "args": {"value": "float"}},
     "recentre_origin": {"label": "Re-zero grid origin", "args": {}, "confirm": True},
+    # One stabilisation gain or trim, written into the flight controller's own
+    # storage by ligmax-pi/nodes/io_manager/tuning.py. The name must be on
+    # `tuning.TUNABLES` and the value inside its range, both checked below - this
+    # command reaches ArduPilot's parameter interface, so the whitelist is what
+    # keeps it away from everything else on the flight controller. Logged at WARN
+    # because a changed gain is the first thing to look for when the hull starts
+    # behaving differently, and it must be findable in the log afterwards.
+    "set_param": {
+        "label": "Save tuning value",
+        "args": {"name": "str", "value": "float"},
+        "confirm": True,
+        "log_level": "WARN",
+    },
+    # Re-read the whole tuning table off the autopilot. The vessel does this on
+    # every connect and once a minute anyway; this is the button for after someone
+    # has been editing parameters in Mission Planner.
+    "get_params": {"label": "Reload tuning from the vessel", "args": {}},
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
 }
 
@@ -195,6 +216,12 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     app.config["LIGMAX_DEPLOY"] = deployments
     cameras = CameraRelay()
     app.config["LIGMAX_CAMERA"] = cameras
+    profiles = tuning.ProfileStore(config.tuning_store)
+    app.config["LIGMAX_TUNING"] = profiles
+    if profiles.last_error:
+        config.warnings.append(
+            f"saved tuning profiles unavailable: {profiles.last_error}"
+        )
 
     # The NTRIP caster is built here so its log lines land in the operator's log
     # panel like everything else, but it does not listen until run.py starts its
@@ -594,6 +621,16 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                     {"error": f"mode '{cleaned['mode']}' not offered by the vessel"}
                 ), 400
 
+        if name == "set_param":
+            # The whitelist and the ranges live in `tuning.py`, mirrored from the
+            # vessel's own copy. Refusing here means the operator gets the reason
+            # immediately instead of watching the command sit at "sent" for a
+            # second and come back "failed".
+            key, number, why = tuning.validate(cleaned.get("name"), cleaned.get("value"))
+            if why is not None:
+                return jsonify({"error": why}), 400  # type: ignore[return-value]
+            cleaned["name"], cleaned["value"] = key, number
+
         if name == "set_mission":
             points = cleaned.get("points")
             if not isinstance(points, list) or not points:
@@ -624,7 +661,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             cleaned["points"] = cleaned_points
 
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
-        level = "ERROR" if spec.get("danger") else "INFO"
+        level = spec.get("log_level") or ("ERROR" if spec.get("danger") else "INFO")
         store.add_log(
             level,
             f"operator command {name} {cleaned or ''}".strip() + f" [{_client_ip()}]",
@@ -760,6 +797,123 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             "gui.deploy",
         )
         return jsonify({"ok": True})
+
+    # -- stabilisation tuning -----------------------------------------------
+    #
+    # The values themselves are not served here: they arrive with the telemetry as
+    # `telemetry.tuning.values`, read off the flight controller by the vessel, and
+    # the panel reads them out of the same store as every other measurement. What
+    # these routes carry is the *table* - which parameters exist, their ranges and
+    # their help text - and the saved profiles, which live on this box.
+    #
+    # Writing a value is not a route: it is the ordinary `set_param` operator
+    # command, so it queues, expires and is audited exactly like an E-stop.
+
+    def _vessel_values() -> dict[str, Any]:
+        block = (store.state.get("telemetry") or {}).get("tuning") or {}
+        values = block.get("values")
+        return values if isinstance(values, dict) else {}
+
+    @app.get("/api/tuning")
+    def tuning_state() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify(
+            {
+                **tuning.spec_payload(),
+                "profiles": profiles.list(),
+                "store": str(profiles.path),
+                "store_error": profiles.last_error,
+                "admin": is_admin(),
+                "server_time": time.time(),
+            }
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/tuning/profiles")
+    def tuning_profile_save() -> Response:
+        """Snapshot the tuning under a name. Defaults to what the vessel reports.
+
+        Sending no `values` is the ordinary case: the operator has just tuned the
+        boat and wants *what is on it right now* recorded, and the browser's idea
+        of that could be a stale field it never refreshed.
+        """
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        payload = request.get_json(silent=True) or {}
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            values = _vessel_values()
+        saved, why = profiles.save(
+            payload.get("name", ""),
+            values,
+            by=_client_ip(),
+            note=str(payload.get("note") or ""),
+        )
+        if why is not None:
+            return jsonify({"error": why}), 400  # type: ignore[return-value]
+        store.add_log(
+            "INFO",
+            f"tuning profile '{saved['name']}' saved with {saved['count']} "
+            f"value(s) [{_client_ip()}]",
+            "gui.tuning",
+        )
+        return jsonify({"ok": True, "profile": saved, "profiles": profiles.list()})
+
+    @app.post("/api/tuning/profiles/<name>/apply")
+    def tuning_profile_apply(name: str) -> Response:
+        """Queue a `set_param` for every value in the profile the vessel does not
+        already have.
+
+        One command per value rather than one bulk write, so each lands in the
+        audit trail with its own ack: a profile that half-applied because one
+        parameter is missing has to be visible as exactly that.
+        """
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        saved = profiles.get(name)
+        if saved is None:
+            return jsonify({"error": f"no profile called '{name}'"}), 404  # type: ignore[return-value]
+
+        live = _vessel_values()
+        queued: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        for key, value in saved.items():
+            spec_name, number, why = tuning.validate(key, value)
+            if why is not None or spec_name is None or number is None:
+                # A read-only or out-of-range entry in an old profile is skipped
+                # rather than failing the whole apply.
+                skipped.append(f"{key}: {why or 'not applicable'}")
+                continue
+            current = live.get(spec_name)
+            if isinstance(current, (int, float)) and abs(float(current) - number) < 1e-9:
+                continue  # already there; do not spend a command on it
+            queued.append(
+                store.queue_command(
+                    "set_param", {"name": spec_name, "value": number},
+                    issued_by=_client_ip(),
+                ).to_ui()
+            )
+        store.add_log(
+            "WARN" if queued else "INFO",
+            f"tuning profile '{name}' applied: {len(queued)} value(s) queued"
+            + (f", {len(skipped)} skipped" if skipped else "")
+            + f" [{_client_ip()}]",
+            "gui.tuning",
+        )
+        return jsonify({"ok": True, "queued": queued, "skipped": skipped})
+
+    @app.delete("/api/tuning/profiles/<name>")
+    def tuning_profile_delete(name: str) -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        ok, why = profiles.delete(name)
+        if not ok:
+            return jsonify({"error": why}), 404  # type: ignore[return-value]
+        store.add_log("INFO", f"tuning profile '{name}' deleted [{_client_ip()}]",
+                      "gui.tuning")
+        return jsonify({"ok": True, "profiles": profiles.list()})
 
     # -- RTK ----------------------------------------------------------------
 

@@ -63,6 +63,52 @@ export async function cancelDeploy(repo) {
   return payload;
 }
 
+/* --- stabilisation tuning --------------------------------------------- */
+
+/**
+ * The tunable-parameter table, its ranges and help text, plus the profiles saved
+ * on the ground station. The *values* do not come from here — they arrive with
+ * the telemetry as `telemetry.tuning.values`, read off the flight controller by
+ * the vessel, so the panel and every other measurement share one source.
+ */
+export async function fetchTuning() {
+  const response = await fetch('/api/tuning', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`tuning table failed: ${response.status}`);
+  return response.json();
+}
+
+async function tuningCall(path, options) {
+  const response = await fetch(path, { credentials: 'same-origin', ...options });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `request failed (${response.status})`);
+  }
+  return payload;
+}
+
+/** Snapshot the tuning under a name. With no `values`, the server records what
+ *  the vessel is reporting right now rather than what this tab last drew. */
+export async function saveTuningProfile(name, { note = '', values = null } = {}) {
+  return tuningCall('/api/tuning/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(values ? { name, note, values } : { name, note }),
+  });
+}
+
+/** Queue a `set_param` per value the vessel does not already have. */
+export async function applyTuningProfile(name) {
+  return tuningCall(`/api/tuning/profiles/${encodeURIComponent(name)}/apply`, {
+    method: 'POST',
+  });
+}
+
+export async function deleteTuningProfile(name) {
+  return tuningCall(`/api/tuning/profiles/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+}
+
 /**
  * Open the telemetry stream. Returns a handle with `.close()`.
  * `handlers` keys map to SSE event names, plus `onOpen` / `onError`.
