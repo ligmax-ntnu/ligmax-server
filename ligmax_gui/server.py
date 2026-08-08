@@ -44,7 +44,7 @@ from flask import (
     url_for,
 )
 
-from . import auth, lights_effects, protocol, tuning
+from . import auth, lights_effects, plan as planning, protocol, tuning
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
@@ -157,6 +157,51 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "args": {"fps": "float"},
         "log_level": "WARN",
     },
+    # --- the autonomy node -------------------------------------------------
+    #
+    # These are the only commands on this list that io_manager does NOT handle:
+    # it routes anything in its `AUTOPILOT_COMMANDS` set through to
+    # ligmax-pi/nodes/self_driving/, which acks each one itself with a
+    # human-readable result. So a refused plan comes back in the operator's own
+    # words ("waypoint 4: 'dock' needs a berth width"), not as a status code.
+    #
+    # `set_plan` is the course itself, with a role on every waypoint - see
+    # plan.py, and note that laying a plan never moves the boat. Engaging is
+    # `autopilot_start`, deliberately a separate, separately-audited action, the
+    # same split `set_mission` has with `set_mode` + `arm`.
+    "set_plan": {
+        "label": "Send course",
+        "args": {"plan": "any"},
+        "confirm": True,
+        "log_level": "WARN",
+    },
+    "clear_plan": {"label": "Forget the course", "args": {}, "confirm": True},
+    # The timer in NJORD §8.1 starts when the boat goes autonomous, and this is
+    # the moment it does: it requests GUIDED, arms, and opens a trip recording.
+    "autopilot_start": {
+        "label": "Engage autonomy",
+        "args": {},
+        "confirm": True,
+        "danger": True,
+        "log_level": "WARN",
+    },
+    "autopilot_stop": {"label": "Disengage autonomy", "args": {}, "log_level": "WARN"},
+    "autopilot_pause": {"label": "Hold station", "args": {}},
+    "autopilot_resume": {"label": "Carry on", "args": {}},
+    "autopilot_skip": {"label": "Skip this waypoint", "args": {}},
+    # NJORD §8.2's recovery: after the 20 s search window the team takes over and
+    # re-enters *behind the last passed waypoint*. This is the button that is
+    # reached for under time pressure, so it takes no argument and no
+    # confirmation - a wrong press is undone by pressing Skip.
+    "autopilot_back": {"label": "Back one waypoint", "args": {}},
+    "autopilot_goto": {"label": "Jump to waypoint", "args": {"index": "float"}},
+    # Recording without engaging, so a manual run can be reviewed afterwards with
+    # the same tools/review_trip.py as an autonomous one.
+    "record_start": {"label": "Start recording", "args": {}},
+    "record_stop": {"label": "Stop recording", "args": {}},
+    # Between tasks: the world model keeps marks for a few seconds after they go
+    # out of view, and the last task's buoys are not this task's.
+    "forget_world": {"label": "Clear what it has seen", "args": {}},
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
 }
 
@@ -258,6 +303,12 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     if effects.last_error:
         config.warnings.append(
             f"saved light effects unavailable: {effects.last_error}"
+        )
+    if effects.examples_error:
+        # Only the bundled examples are missing - saving and sending still
+        # work - so this is a warning, not a refusal to start.
+        config.warnings.append(
+            f"example light effects unavailable: {effects.examples_error}"
         )
 
     # The NTRIP caster is built here so its log lines land in the operator's log
@@ -405,6 +456,12 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 "obstacle_types": protocol.OBSTACLE_TYPES,
                 "wrong_side_length": protocol.WRONG_SIDE_LENGTH,
                 "commands": COMMAND_SPECS,
+                # The waypoint roles, so the course editor renders its dropdown
+                # and its help text from the same table the validator refuses
+                # against. Adding a role on the vessel then means changing
+                # plan.py here and nothing in the frontend.
+                "waypoint_roles": planning.role_table(),
+                "max_waypoints": planning.MAX_WAYPOINTS,
                 "vessel_status": protocol.VESSEL_STATUS,
                 "server_time": time.time(),
                 "shared_settings": protocol.SHARED_SETTINGS_AVAILABLE,
@@ -629,12 +686,29 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
         response = jsonify(
             {
+                # Names and frame counts only. The page re-lists every 15 s and
+                # the bundled examples are a few hundred kB of hex between
+                # them; frames come from the route below, one effect at a time,
+                # when Load is actually pressed.
                 "effects": effects.list(),
                 "store": str(effects.path),
                 "store_error": effects.last_error,
+                "examples": str(effects.examples_path or ""),
+                "examples_error": effects.examples_error,
                 "admin": is_admin(),
             }
         )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/lights/effects/<name>")
+    def lights_effects_get(name: str) -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        entry = effects.entry(name)
+        if entry is None:
+            return jsonify({"error": f"no effect called '{name}'"}), 404  # type: ignore[return-value]
+        response = jsonify({"effect": entry})
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -660,6 +734,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     def lights_effects_delete(name: str) -> Response:
         if not is_admin():
             return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        if effects.is_example(name):
+            # Not a 404: the name exists, it is just not the operator's to
+            # delete. `tools/gen_light_effects.py` owns the examples.
+            return jsonify({"error": f"'{name}' is a bundled example"}), 400  # type: ignore[return-value]
         ok, why = effects.delete(name)
         if not ok:
             return jsonify({"error": why}), 404  # type: ignore[return-value]
@@ -777,6 +855,25 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 cleaned_points.append([x, y])
             cleaned["points"] = cleaned_points
 
+        if name == "set_plan":
+            # plan.validate() mirrors ligmax-pi/nodes/self_driving/plan.py's
+            # `Plan.parse()`. The vessel still refuses independently - it is the
+            # one that can - but a course is typed in under time pressure on a
+            # competition morning, and "waypoint 7 has neither lat/lon nor x/y"
+            # is worth having before the upload rather than after it.
+            cleaned_plan, why = planning.validate(cleaned.get("plan"))
+            if why is not None:
+                return jsonify({"error": why}), 400  # type: ignore[return-value]
+            cleaned["plan"] = cleaned_plan
+
+        if name == "autopilot_goto":
+            index = cleaned.get("index")
+            if index is None or not math.isfinite(index) or index < 0:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'index' must be a waypoint number, counting from 0"}
+                ), 400
+            cleaned["index"] = int(index)
+
         if name == "set_lights_pattern":
             # lights_effects.validate_frames() mirrors
             # ligmax-pi/nodes/io_manager/lights.py's `_parse_pattern()` -
@@ -804,6 +901,11 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             frames = cleaned.get("frames") or []
             loop_s = sum(f.get("hold_ms", 0) for f in frames) / 1000.0
             logged_args = f"{{'frames': {len(frames)} frame(s), {loop_s:.1f}s loop}}"
+        elif name == "set_plan":
+            # Same reasoning: the audit trail is read after something has gone
+            # wrong, and forty lat/lon pairs in it hide the line worth finding.
+            # What distinguishes one upload from the next is its shape.
+            logged_args = planning.summarise(cleaned["plan"])
         else:
             logged_args = cleaned or ""
         store.add_log(

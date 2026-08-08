@@ -7,6 +7,7 @@
 
 import { sendCommand } from './api.js';
 import * as fmt from './format.js';
+import { describeRow, rowToWaypoint, shapeOf } from './plan.js';
 
 const HOLD_MS = 800;
 
@@ -217,12 +218,14 @@ export class CommandPanel {
       button.setAttribute('aria-pressed', String(on));
       button.textContent = on
         ? 'Click the map to add waypoints — Esc to stop'
-        : 'Lay a mission on the map';
+        : 'Lay a course on the map';
     }
     this.onMissionArmed?.(on);
   }
 
-  /** Called by the map every time the draft changes: a point added, undone or cleared. */
+  /** Called by the map every time the draft changes: a point added, undone or cleared.
+   *  Each entry is `{x, y, role}` — grid metres plus which rules apply on the leg
+   *  into it. */
   setMissionPoints(points) {
     this.missionPoints = points;
     this._updateMissionUI();
@@ -233,7 +236,7 @@ export class CommandPanel {
     const count = this.missionPoints.length;
     if (missionCount) {
       missionCount.textContent = count
-        ? `${count} waypoint${count === 1 ? '' : 's'} laid, not yet sent`
+        ? `${count} waypoint${count === 1 ? '' : 's'} laid — ${shapeOf(this.missionPoints)}, not yet sent`
         : 'No waypoints laid yet';
     }
     const empty = !this.canSend || !count;
@@ -242,19 +245,38 @@ export class CommandPanel {
     if (missionSend) missionSend.disabled = empty;
   }
 
-  /** Confirm and send the drafted mission, then clear it — sent or cancelled. */
+  /**
+   * Confirm and send the drafted course, then clear it — sent or cancelled.
+   *
+   * This goes out as `set_plan`, to the autonomy node, *not* as the older
+   * `set_mission`, which uploads a bare MAVLink mission for the Pixhawk to fly
+   * in AUTO with no planner involved. The two are genuinely different things and
+   * both still exist: a mission is a list of places, a course is a list of places
+   * plus the rules in force between them. Roles are the whole reason to prefer
+   * this one, so a drafted course with roles on it must never quietly degrade
+   * into a mission that drops them.
+   */
   async submitMission() {
     const points = this.missionPoints;
     if (!points.length) return;
-    const summary = points.map(([x, y]) => `${x.toFixed(1)}, ${y.toFixed(1)}`).join(' → ');
+    const preview = points.map(describeRow).join('\n');
     const blocked = window.confirm(
-      `Send a ${points.length}-waypoint mission to the vessel?\n\n${summary}\n\n` +
-        'The vessel only uploads it — arm and set the mode to AUTO separately to run it.'
+      `Send a ${points.length}-waypoint course to the vessel?\n\n${preview}\n\n` +
+        'This only loads the course. The boat does not move until you press Engage.'
     );
     if (!blocked) return;
-    const ok = await this._send('set_mission', { points });
+    const plan = {
+      name: 'chart',
+      waypoints: points.map(rowToWaypoint),
+    };
+    const ok = await this._send('set_plan', { plan });
     if (ok) {
-      this.notify(`Mission sent: ${points.length} waypoint(s).`, 'ok');
+      this.notify(
+        `Course sent: ${points.length} waypoint(s). Check the ack, then check the ` +
+          'route on the chart before engaging.',
+        'ok',
+        12000
+      );
       this.onMissionClear?.();
       this.setMissionArmed(false);
     }

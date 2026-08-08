@@ -118,6 +118,21 @@
             </div>
           </section>
 
+          <!-- ------------------------------------------------ autonomy -->
+          <!-- What the boat has decided and why, plus the six controls that
+               interrupt it. NJORD §11.4 scores decision-making transparency, and
+               §8.2 makes "back one waypoint" the recovery after a takeover — so
+               that button is one tap and asks nothing. -->
+          <section class="card card--autopilot" id="autopilot-card">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">Autonomy</span>
+                <h2 class="card-title">Autopilot</h2>
+              </div>
+            </header>
+            <div id="autopilot-panel"></div>
+          </section>
+
           <!-- ------------------------------------------------ telemetry -->
           <div class="control-telemetry" id="telemetry-panels"></div>
 
@@ -140,6 +155,83 @@
               checkout with uncommitted changes refuses the update rather than
               discarding it. Updating <code>ligmax-pi</code> restarts its nodes, which
               drops propulsion power for the length of the restart.
+            </p>
+          </section>
+
+          <!-- ------------------------------------------------ the course -->
+          <!-- Built for one moment: 08:15 on a competition morning, on a phone,
+               on a dock. The coordinates are handed out at 08:00 and the first
+               run is at 09:00, so this is paste-first — a box that swallows
+               whatever the handout looks like and shows back an editable table —
+               rather than anything you have to be sitting down to use.
+
+               The role on each row is what makes this a course rather than a
+               list of places: it decides which rules are in force on the leg
+               into that waypoint, and the vessel swaps behaviour as it advances
+               instead of anyone re-uploading mid-run. Full width because it is
+               a worktable, not a sidebar widget. -->
+          <section class="card card--course" id="course-card">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">Navigation</span>
+                <h2 class="card-title">The course</h2>
+              </div>
+              <div class="course-tools">
+                <button class="chip" id="course-load" type="button"
+                        title="Rebuild this editor from the course the vessel is actually running, read off the route it echoed back — not off whatever this tab last sent.">
+                  Load from the vessel
+                </button>
+              </div>
+            </header>
+
+            <div class="course-meta">
+              <label class="field">
+                <span class="field-label">Course name</span>
+                <input class="input input--sm" id="course-name" type="text" value="course"
+                       maxlength="64" placeholder="task1" />
+              </label>
+              <label class="field">
+                <span class="field-label">Direction of buoyage (°)</span>
+                <input class="input input--sm" id="course-bearing" type="number"
+                       min="0" max="359" step="1" value="0"
+                       title="Sailing this way, red is kept to port and green to starboard. Njord lays its course with seaward = north, which is 0 — but a leg that runs back down the course inverts the sense, and a boat applying the outbound rule on the return passes every gate on the wrong side." />
+              </label>
+            </div>
+
+            <label class="field field--block">
+              <span class="field-label">Paste the handout</span>
+              <textarea class="input input--mono" id="course-paste" rows="4" spellcheck="false"
+                        placeholder="63.43050, 10.39506&#10;1.1  63.43112  10.39640  transit&#10;2, 63.43180, 10.39702, buoys"></textarea>
+            </label>
+            <p class="card-note card-note--tight">
+              One waypoint per line. Two numbers are read as latitude then
+              longitude; three or more and the first is taken as the point's
+              label, which is how <code>1.1&nbsp;63.43112&nbsp;10.39640</code>
+              works. A role word anywhere on the line sets that row's role.
+              Everything is shown back as a table below before anything is sent.
+              <kbd>Ctrl</kbd>+<kbd>Enter</kbd> reads the box.
+            </p>
+
+            <div class="course-actions">
+              <button class="btn btn--outline btn--sm" id="course-parse" type="button">Read the paste</button>
+              <button class="btn btn--outline btn--sm" id="course-add" type="button">Add a blank row</button>
+              <button class="btn btn--outline btn--sm" id="course-clear" type="button">Clear</button>
+            </div>
+
+            <div class="wp-list" id="course-rows"></div>
+
+            <div class="course-foot">
+              <p class="card-note card-note--tight" id="course-summary">Nothing to send yet.</p>
+              <button class="btn btn--primary" id="course-send" type="button" disabled>Send course</button>
+            </div>
+
+            <p class="card-note card-note--tight">
+              Sending only <strong>loads</strong> the course — the boat does not
+              move until Engage is pressed on the autopilot panel, which is a
+              separate, separately audited action. The vessel validates the plan
+              again itself and refuses with a reason you can read in the command
+              history. Points can also be laid by clicking the chart on the
+              <a href="/">overview page</a>.
             </p>
           </section>
 

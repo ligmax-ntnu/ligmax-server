@@ -103,6 +103,22 @@
 
           <!-- ------------------------------------------------------- side -->
           <aside class="overview-side">
+            <!-- What the boat has decided, and why, in its own words. First in
+                 the column because NJORD §11.4 scores decision-making
+                 transparency on its own, and because a jury member reading this
+                 page over someone's shoulder needs one sentence, not a field
+                 list. The buttons appear for admins only; everyone else reads
+                 the same status. -->
+            <section class="card card--autopilot" id="autopilot-card">
+              <header class="card-head card-head--tight">
+                <div>
+                  <span class="eyebrow">Autonomy</span>
+                  <h2 class="card-title">What it is doing, and why</h2>
+                </div>
+              </header>
+              <div id="autopilot-panel"></div>
+            </section>
+
             <!-- Camera. Off by default and deliberately small: the pictures come
                  up the same 4G uplink as the telemetry, so this is the one panel
                  that costs the boat something to show. -->
@@ -149,22 +165,34 @@
                   Pick a go-to point on the map
                 </button>
 
-                <!-- Laying a mission is the same kind of map interaction as
+                <!-- Laying a course is the same kind of map interaction as
                      go-to, just several points instead of one, so it lives here
-                     too rather than on /control. Sending it only uploads the
-                     route to the autopilot - running it is a separate mode
-                     change and arm, both on the control page, so the two stay
-                     distinct, audited actions. -->
+                     too rather than on /control. Sending it only loads the
+                     course - engaging is a separate, separately audited action,
+                     so the two stay distinct.
+
+                     The role picker is what makes this a course rather than a
+                     list of places: it decides which rules are in force on the
+                     leg into each waypoint, and it sticks until it is changed,
+                     because a course runs in stretches of one role. -->
                 <div class="mission-lay">
                   <button class="chip chip--toggle chip--wide" id="mission-arm" type="button" aria-pressed="false">
-                    Lay a mission on the map
+                    Lay a course on the map
                   </button>
+                  <label class="field field--inline">
+                    <span class="field-label">Next points are</span>
+                    <select id="mission-role" class="select select--sm"></select>
+                  </label>
                   <p class="card-note card-note--tight" id="mission-count">No waypoints laid yet</p>
                   <div class="mission-lay-buttons">
                     <button class="btn btn--outline btn--sm" id="mission-undo" type="button" disabled>Undo point</button>
                     <button class="btn btn--outline btn--sm" id="mission-clear" type="button" disabled>Clear</button>
-                    <button class="btn btn--primary btn--sm" id="mission-send" type="button" disabled>Send mission</button>
+                    <button class="btn btn--primary btn--sm" id="mission-send" type="button" disabled>Send course</button>
                   </div>
+                  <p class="card-note card-note--tight">
+                    The full editor — pasted coordinates, hold times, speeds — is
+                    on the <a href="/control">control page</a>.
+                  </p>
                 </div>
 
                 <p class="card-note card-note--tight">

@@ -7,8 +7,9 @@
  * is the map imagery underneath that gets rotated, not the grid.
  */
 
-import { CARDINALS, nameOf, styleOf } from './obstacles.js';
+import { CARDINALS, letterOf, nameOf, styleOf } from './obstacles.js';
 import { zonesFor } from './nogo.js';
+import { styleOfRole } from './plan.js';
 import { TileLayer } from './tiles.js';
 
 const PALETTE = {
@@ -72,13 +73,18 @@ export class WorldMap {
     this.camera = { cx: 0, cy: 40, ppm: 5.5 };
     this.follow = true;
     this.pickMode = false;
-    // A mission being laid: `missionMode` on means a click adds a point rather
-    // than panning, and `missionDraft` is what has been placed so far, held
-    // here (not in the command panel) because it is drawn every frame like
-    // everything else on the chart. Survives `setMissionMode(false)` so
-    // toggling out to pan and back in does not lose progress.
+    // A course being laid: `missionMode` on means a click adds a waypoint rather
+    // than panning, and `missionDraft` is what has been placed so far — each
+    // entry `{x, y, role}` — held here (not in the command panel) because it is
+    // drawn every frame like everything else on the chart. Survives
+    // `setMissionMode(false)` so toggling out to pan and back in does not lose
+    // progress.
+    //
+    // `missionRole` is what the *next* click gets. A course runs in stretches of
+    // one role rather than alternating, so it sticks until it is changed.
     this.missionMode = false;
     this.missionDraft = [];
+    this.missionRole = 'transit';
 
     this.width = 0;
     this.height = 0;
@@ -148,8 +154,14 @@ export class WorldMap {
     this.invalidate();
   }
 
-  addMissionPoint(point) {
-    this.missionDraft.push(point);
+  /** What role a click adds from now on. Existing points keep theirs. */
+  setMissionRole(role) {
+    this.missionRole = role;
+    this.invalidate();
+  }
+
+  addMissionPoint([x, y]) {
+    this.missionDraft.push({ x, y, role: this.missionRole });
     this.onMissionChange?.(this.missionDraft);
     this.invalidate();
   }
@@ -246,6 +258,9 @@ export class WorldMap {
     include(boat?.position, 6);
     for (const track of tracks ?? []) include(track.position, (track.avoid_radius ?? 0) + 2);
     for (const path of paths ?? []) for (const point of path.points ?? []) include(point, 2);
+    // A course being laid is the thing most likely to be off screen — you zoom
+    // out to place the far end of it — so "fit everything" has to mean it too.
+    for (const point of this.missionDraft) include([point.x, point.y], 2);
 
     if (!xs.length) {
       this.camera = { cx: 0, cy: 40, ppm: 5.5 };
@@ -708,12 +723,15 @@ export class WorldMap {
 
     for (const path of ordered) {
       const points = path.points ?? [];
-      if (points.length < 2) continue;
 
+      // Checked before the length guard: a one-waypoint course is a real thing
+      // (Task 3 starts 10 m from the dock), and it still has to be drawn.
       if (REFERENCE_KINDS.has(path.kind)) {
-        if (this.layers.route) this._drawReferenceRoute(ctx, path);
+        if (this.layers.route && points.length) this._drawReferenceRoute(ctx, path);
         continue;
       }
+
+      if (points.length < 2) continue;
 
       const primary = path.kind === 'planned';
       const screen = points.map(([x, y]) => this.worldToScreen(x, y));
@@ -760,43 +778,113 @@ export class WorldMap {
     }
   }
 
-  /** The ideal route: amber, long-dashed, one numbered ring per GNSS waypoint. */
+  /**
+   * The course: one leg per waypoint, each coloured by the rule in force on it.
+   *
+   * A Njord plan is a list of places *plus what to do between them* — blind GNSS
+   * on one leg, buoy rules on the next, COLREG on the one after, a dock at the
+   * end. Drawing all of that in one amber line throws away the only thing about
+   * a course worth checking before it is run, and hides the mistake that is
+   * cheapest to make and most expensive to discover: a role typed into the wrong
+   * row. So the **leg** carries the colour of the waypoint it runs to (the role
+   * governs the approach, not the arrival), and the **marker** carries the
+   * role's letter.
+   *
+   * The cursor comes from `telemetry.autopilot.plan.index` in preference to the
+   * path's own `target_index`: the path is only republished when a plan is
+   * uploaded, so its copy goes stale the moment the boat passes waypoint one,
+   * while the telemetry cursor is live at 2 Hz and costs nothing extra.
+   */
   _drawReferenceRoute(ctx, path) {
-    const screen = (path.points ?? []).map(([x, y]) => this.worldToScreen(x, y));
-    if (screen.length < 2) return;
+    const points = path.points ?? [];
+    const screen = points.map(([x, y]) => this.worldToScreen(x, y));
+    if (!screen.length) return;
+
+    const roles = path.roles ?? null;
+    const names = path.names ?? null;
+    const plan = this.store.state.telemetry?.autopilot?.plan ?? null;
+    const cursor = Number.isFinite(plan?.index) ? plan.index : path.target_index ?? -1;
+    const finished = Boolean(plan?.finished);
+    const colourAt = (index) => (roles ? styleOfRole(roles[index]).colour : PALETTE.route);
 
     ctx.save();
-    ctx.strokeStyle = PALETTE.route;
-    ctx.lineWidth = 1.6;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.setLineDash([10, 6]);
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    screen.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.stroke();
-    ctx.setLineDash([]);
 
-    // Hollow rings, not filled dots: the survey points are where the boat is
-    // *meant* to pass, and a filled marker reads as something detected.
-    const showNumbers = this.layers.labels && this.camera.ppm > 1.2;
-    screen.forEach(([x, y], index) => {
+    // Legs, drawn one at a time so each can carry its own role colour. Dashed
+    // throughout, so the course can never be confused with the cyan path the
+    // planner has actually committed to.
+    ctx.setLineDash([10, 6]);
+    ctx.lineWidth = 2;
+    for (let index = 1; index < screen.length; index += 1) {
+      const done = !finished && index <= cursor;
+      ctx.globalAlpha = done ? 0.32 : 0.92;
+      ctx.strokeStyle = colourAt(index);
       ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI * 2);
-      ctx.strokeStyle = PALETTE.route;
-      ctx.lineWidth = 1.5;
+      ctx.moveTo(screen[index - 1][0], screen[index - 1][1]);
+      ctx.lineTo(screen[index][0], screen[index][1]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    const showText = this.layers.labels && this.camera.ppm > 1.2;
+    screen.forEach(([x, y], index) => {
+      const passed = !finished && index < cursor;
+      const current = !finished && index === cursor;
+      const style = roles ? styleOfRole(roles[index]) : null;
+      const colour = colourAt(index);
+      const size = current ? 8 : 6;
+
+      ctx.globalAlpha = passed ? 0.4 : 1;
+
+      // The waypoint the boat is heading for gets a halo, so "where is it going"
+      // is answerable from across the tent.
+      if (current) {
+        ctx.beginPath();
+        ctx.arc(x, y, size + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // A diamond, not a circle: obstacles are round, and a place the operator
+      // chose must never look like a thing the boat found.
+      ctx.beginPath();
+      ctx.moveTo(x, y - size);
+      ctx.lineTo(x + size, y);
+      ctx.lineTo(x, y + size);
+      ctx.lineTo(x - size, y);
+      ctx.closePath();
+      ctx.fillStyle = passed ? 'rgba(10, 17, 40, 0.55)' : colour;
+      ctx.fill();
+      ctx.strokeStyle = passed ? colour : 'rgba(10, 17, 40, 0.8)';
+      ctx.lineWidth = 1.4;
       ctx.stroke();
 
-      if (!showNumbers) return;
+      // The role's letter inside it. This is the whole point of the layer: a
+      // glance says which legs obey the buoy rules and which are blind.
+      if (style && size >= 6) {
+        ctx.fillStyle = passed ? colour : 'rgba(10, 17, 40, 0.9)';
+        ctx.font = `700 ${Math.round(size * 1.1)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(style.code, x, y + 0.5);
+      }
+
+      if (!showText) return;
+      const label = names?.[index] || String(index + 1);
       ctx.font = '600 9px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(10, 17, 40, 0.6)';
-      ctx.fillRect(x - 6, y - 15, 12, 11);
-      ctx.fillStyle = PALETTE.route;
-      ctx.fillText(String(index + 1), x, y - 9.5);
+      const width = ctx.measureText(label).width + 6;
+      ctx.fillStyle = 'rgba(10, 17, 40, 0.7)';
+      ctx.fillRect(x - width / 2, y - size - 15, width, 12);
+      ctx.fillStyle = passed ? PALETTE.muted : '#ffffff';
+      ctx.fillText(label, x, y - size - 9);
     });
 
+    ctx.globalAlpha = 1;
     if (path.label && this.camera.ppm > 0.8) {
       const [lx, ly] = screen[Math.floor(screen.length / 2)];
       ctx.font = '600 10px system-ui, sans-serif';
@@ -804,16 +892,23 @@ export class WorldMap {
       ctx.textBaseline = 'middle';
       const metrics = ctx.measureText(path.label);
       ctx.fillStyle = 'rgba(10, 17, 40, 0.66)';
-      ctx.fillRect(lx + 6, ly - 7, metrics.width + 6, 14);
+      ctx.fillRect(lx + 10, ly - 7, metrics.width + 6, 14);
       ctx.fillStyle = PALETTE.route;
-      ctx.fillText(path.label, lx + 9, ly);
+      ctx.fillText(path.label, lx + 13, ly);
     }
     ctx.restore();
   }
 
-  /** A mission being laid, not yet sent: numbered squares, solid white line. */
+  /**
+   * A course being laid, not yet sent.
+   *
+   * Deliberately unlike the layer above: solid line, square markers, and a white
+   * outline on every one. This is a local draft that the vessel has never seen,
+   * and the moment it starts looking like the route the boat is running is the
+   * moment somebody engages autonomy on a course that was never uploaded.
+   */
   _drawMissionDraft(ctx) {
-    const screen = this.missionDraft.map(([x, y]) => this.worldToScreen(x, y));
+    const screen = this.missionDraft.map((point) => this.worldToScreen(point.x, point.y));
 
     ctx.save();
     if (screen.length >= 2) {
@@ -825,24 +920,30 @@ export class WorldMap {
       ctx.beginPath();
       screen.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.stroke();
+      ctx.globalAlpha = 1;
     }
 
     screen.forEach(([x, y], index) => {
-      ctx.fillStyle = PALETTE.draft;
-      ctx.strokeStyle = 'rgba(10, 17, 40, 0.85)';
-      ctx.lineWidth = 1.2;
+      const style = styleOfRole(this.missionDraft[index].role);
+      ctx.fillStyle = style.colour;
+      ctx.strokeStyle = PALETTE.draft;
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.rect(x - 4, y - 4, 8, 8);
+      ctx.rect(x - 5, y - 5, 10, 10);
       ctx.fill();
       ctx.stroke();
 
-      ctx.font = '600 9px system-ui, sans-serif';
+      ctx.font = '700 9px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(10, 17, 40, 0.9)';
+      ctx.fillText(style.code, x, y + 0.5);
+
       ctx.fillStyle = 'rgba(10, 17, 40, 0.7)';
-      ctx.fillRect(x - 6, y - 19, 12, 11);
+      ctx.fillRect(x - 6, y - 20, 12, 11);
       ctx.fillStyle = PALETTE.draft;
-      ctx.fillText(String(index + 1), x, y - 13.5);
+      ctx.font = '600 9px system-ui, sans-serif';
+      ctx.fillText(String(index + 1), x, y - 14.5);
     });
     ctx.restore();
   }
@@ -880,8 +981,11 @@ export class WorldMap {
       }
 
       if (showLabels || hovered) {
+        // The vessel's own words win over ours when it sent any: it says
+        // "cardinal (side unknown)" where a type number alone would say
+        // "Cardinal", and the difference is the bit worth reading.
         const label = this.layers.ids
-          ? `#${track.track_id} ${style.label}`
+          ? `#${track.track_id} ${track.label ?? style.label}`
           : `#${track.track_id}`;
         ctx.font = '600 10px system-ui, sans-serif';
         ctx.textAlign = 'left';
@@ -947,13 +1051,17 @@ export class WorldMap {
     }
 
     // Cardinal marks carry their letter: which side you must pass on is the
-    // whole point of the mark, so spell it out.
+    // whole point of the mark, so spell it out. An unresolved one draws `?` —
+    // the camera has seen black-and-yellow and has not yet committed to which of
+    // the four it is, and that is a materially different thing to know than
+    // "north cardinal", because it is the state in which the boat falls back to
+    // the side the plan asked for.
     if (CARDINALS.has(name) && size >= 6) {
       ctx.fillStyle = '#1a1a1a';
       ctx.font = `700 ${Math.round(size * 1.15)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(name[0], sx, sy + 0.5);
+      ctx.fillText(letterOf(track), sx, sy + 0.5);
     }
     ctx.restore();
   }

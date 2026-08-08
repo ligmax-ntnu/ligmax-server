@@ -110,6 +110,9 @@ _MIRRORED_OBSTACLE_TYPES: dict[str, int] = {
     "BOAT": 7,
     "LAND": 8,
     "DOCKING_CENTER": 9,
+    # A cardinal whose side the camera has not committed to yet. Appended on the
+    # vessel, so it is appended here - see `shared_settings.ObstacleType`.
+    "CARDINAL": 10,
 }
 
 _MIRRORED_WRONG_SIDE_LENGTH = 20.0
@@ -404,10 +407,21 @@ def normalise_track(raw: Any, index: int = 0) -> dict[str, Any] | None:
     if velocity is not None:
         track["velocity"] = velocity
 
-    for optional in ("age", "hits", "misses", "source", "label", "radius"):
-        if optional in raw:
-            value = raw[optional]
-            track[optional] = _num(value) if optional != "source" else str(value)
+    for optional in ("age", "hits", "misses", "radius", "speed", "width_m"):
+        if (value := _num(raw.get(optional))) is not None:
+            track[optional] = value
+
+    # Text, not numbers. These used to go through the numeric branch above,
+    # which turned every one of them into None - `label` in particular, which is
+    # the vessel's own words for the thing ("cardinal (side unknown)") and the
+    # only field that survives a type number the frontend has never seen.
+    #
+    # `why` is the sentence the tracker wrote about this object, and NJORD §11.4
+    # scores exactly that: how a detection changed the plan, in words a jury
+    # member reads without help. It reaches the operator on hover.
+    for optional in ("source", "label", "why", "cardinal"):
+        if raw.get(optional) is not None:
+            track[optional] = str(raw[optional])[:200]
 
     # Explicit planner override wins over the rule above.
     no_go = raw.get("no_go")
@@ -447,9 +461,29 @@ def _normalise_path(raw: Any) -> dict[str, Any] | None:
     target = _num(raw.get("target_index"))
     if target is not None:
         path["target_index"] = int(target)
+    passed = _num(raw.get("passed_index"))
+    if passed is not None:
+        path["passed_index"] = int(passed)
     cost = _num(raw.get("cost"))
     if cost is not None:
         path["cost"] = cost
+
+    # A reference route carries what each waypoint is *for* — see
+    # ligmax-pi/nodes/self_driving/plan.py's `reference_layer()`. The arrays run
+    # in lockstep with `points`, so anything that is not exactly the same length
+    # is dropped entirely rather than applied to the first n waypoints: a course
+    # drawn with the roles shifted one place along is plausible, complete and
+    # wrong, which is the worst thing a chart can be.
+    for key in ("roles", "names"):
+        values = raw.get(key)
+        if isinstance(values, (list, tuple)) and len(values) == len(points):
+            path[key] = [str(value)[:32] for value in values]
+    indices = raw.get("indices")
+    if isinstance(indices, (list, tuple)) and len(indices) == len(points):
+        cleaned = [_num(value) for value in indices]
+        if all(value is not None for value in cleaned):
+            path["indices"] = [int(value) for value in cleaned]  # type: ignore[arg-type]
+
     return path
 
 

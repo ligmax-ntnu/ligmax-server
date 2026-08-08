@@ -12,12 +12,14 @@
  * other is a click on the chart.
  */
 
+import { AutopilotPanel } from './autopilot.js';
 import { CameraPanel } from './camera.js';
 import { CommandPanel } from './commands.js';
 import * as fmt from './format.js';
 import { WorldMap } from './map.js';
 import { legendFor, styleOf } from './obstacles.js';
 import { wrongSideDirection } from './nogo.js';
+import { roleList } from './plan.js';
 import {
   $,
   bootShell,
@@ -190,6 +192,8 @@ function renderTooltip(store, hover) {
 
   rows.push(['Position', `${track.position[0].toFixed(1)}, ${track.position[1].toFixed(1)} m`]);
   rows.push(['Confidence', `${(100 * (track.confidence ?? 0)).toFixed(0)} %`]);
+  if (Number.isFinite(track.width_m)) rows.push(['Width', `${track.width_m.toFixed(2)} m`]);
+  if (Number.isFinite(track.speed)) rows.push(['Speed', `${track.speed.toFixed(2)} m/s`]);
   rows.push(['Avoid radius', `${(track.avoid_radius ?? 0).toFixed(1)} m`]);
 
   if (boat) {
@@ -213,13 +217,20 @@ function renderTooltip(store, hover) {
   }
   if (track.source) rows.push(['Source', track.source]);
   if (Number.isFinite(track.age)) rows.push(['Age', `${track.age.toFixed(1)} s`]);
+  // How many camera votes a cardinal has, and whether they have settled. The
+  // boat falls back to the planned side until they do, so "not committed" is
+  // the difference between the rule steering the boat and the plan doing it.
+  if (track.cardinal) rows.push(['Topmark', track.cardinal]);
 
   const title = document.createElement('div');
   title.className = 'map-tooltip-title';
   const swatch = document.createElement('span');
   swatch.className = 'legend-swatch';
   swatch.style.background = style.colour;
-  title.append(swatch, document.createTextNode(`#${track.track_id} · ${style.label}`));
+  title.append(
+    swatch,
+    document.createTextNode(`#${track.track_id} · ${track.label ?? style.label}`)
+  );
 
   const list = document.createElement('dl');
   for (const [key, value] of rows) {
@@ -230,7 +241,18 @@ function renderTooltip(store, hover) {
     list.append(dt, dd);
   }
 
-  tooltip.replaceChildren(title, list);
+  const nodes = [title, list];
+  // The tracker's own sentence about this object. NJORD §11.4 scores exactly
+  // this — "how a detected object changed the plan" — so it gets its own line in
+  // the boat's words rather than being folded into a field list.
+  if (track.why) {
+    const why = document.createElement('p');
+    why.className = 'map-tooltip-why';
+    why.textContent = track.why;
+    nodes.push(why);
+  }
+
+  tooltip.replaceChildren(...nodes);
   tooltip.hidden = false;
 
   // Keep the tooltip inside the map, flipping sides near the right edge.
@@ -381,12 +403,40 @@ async function boot() {
     commandPanel.onMissionClear = () => map.clearMissionDraft();
     map.onMissionChange = (points) => commandPanel.setMissionPoints(points);
 
+    // Which rules apply to the next points clicked. Populated from the server's
+    // role table so adding a role on the vessel needs no change here.
+    const rolePicker = $('mission-role');
+    for (const entry of roleList(store.session)) {
+      const option = document.createElement('option');
+      option.value = entry.name;
+      option.textContent = entry.label;
+      option.title = entry.help;
+      rolePicker.append(option);
+    }
+    const applyRole = () => {
+      map.setMissionRole(rolePicker.value);
+      rolePicker.title =
+        roleList(store.session).find((entry) => entry.name === rolePicker.value)?.help ?? '';
+    };
+    rolePicker.addEventListener('change', applyRole);
+    applyRole();
+
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
       if (commandPanel.pickingGoto) commandPanel.setGotoArmed(false);
       if (commandPanel.pickingMission) commandPanel.setMissionArmed(false);
     });
   }
+
+  /* --- autonomy ----------------------------------------------------- */
+
+  // Rendered for everyone: what the boat has decided is a measurement, and the
+  // jury reads it off this page. Only the buttons are gated.
+  const autopilotPanel = new AutopilotPanel($('autopilot-panel'), store, {
+    notify,
+    canSend: admin,
+    compact: true,
+  });
 
   /* --- store -> ui -------------------------------------------------- */
 
@@ -411,6 +461,7 @@ async function boot() {
     updateLegend(store);
     kpiStrip.update();
     updatePlainFacts(store);
+    autopilotPanel.update();
     updateHeader(store);
   });
 
@@ -425,7 +476,9 @@ async function boot() {
 
   connectShellStream(store);
 
-  window.ligmax = { store, map, kpiStrip, commandPanel, cameraPanel };
+  autopilotPanel.update();
+
+  window.ligmax = { store, map, kpiStrip, commandPanel, cameraPanel, autopilotPanel };
 
   startHeartbeat(store, () => {
     kpiStrip.update();

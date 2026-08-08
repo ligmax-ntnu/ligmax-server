@@ -16,6 +16,7 @@
  * work, not the security boundary.
  */
 
+import { AutopilotPanel, CoursePlanner } from './autopilot.js';
 import { CommandPanel, renderCommandHistory } from './commands.js';
 import { DeployPanel } from './deploy.js';
 import { LogConsole, downloadText } from './logs.js';
@@ -88,6 +89,33 @@ async function boot() {
     { notify, canSend: admin }
   );
 
+  /* --- autonomy ----------------------------------------------------- */
+
+  // Both rendered for everyone and gated on `canSend`, for the same reason the
+  // tuning panel is: what the boat has decided and what course is loaded are
+  // measurements, and a read-only viewer should be able to read them.
+  const autopilotPanel = new AutopilotPanel($('autopilot-panel'), store, {
+    notify,
+    canSend: admin,
+  });
+
+  const coursePlanner = new CoursePlanner(
+    {
+      paste: $('course-paste'),
+      parseButton: $('course-parse'),
+      addButton: $('course-add'),
+      clearButton: $('course-clear'),
+      sendButton: $('course-send'),
+      loadButton: $('course-load'),
+      nameInput: $('course-name'),
+      bearingInput: $('course-bearing'),
+      rows: $('course-rows'),
+      summary: $('course-summary'),
+    },
+    store,
+    { notify, canSend: admin }
+  );
+
   /* --- stabilisation tuning ----------------------------------------- */
 
   // Rendered for everyone: what the boat is tuned to is a measurement, and a
@@ -122,6 +150,7 @@ async function boot() {
     kpiStrip.update();
     telemetryPanels.update();
     commandPanel.syncModes();
+    autopilotPanel.update();
     tuningPanel.update();
     updateHeader(store);
   });
@@ -142,6 +171,7 @@ async function boot() {
   });
 
   renderCommandHistory($('cmd-list'), []);
+  autopilotPanel.update();
 
   connectShellStream(store);
 
@@ -154,6 +184,8 @@ async function boot() {
     telemetryPanels,
     deployPanel,
     tuningPanel,
+    autopilotPanel,
+    coursePlanner,
   };
 
   startHeartbeat(store, () => kpiStrip.update());

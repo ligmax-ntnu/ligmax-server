@@ -9,12 +9,26 @@ export const STYLES = {
   UNKNOWN: { colour: '#8b98ae', label: 'Unknown', glyph: 'ring', order: 8 },
   RED: { colour: '#e2453f', label: 'Red lateral', glyph: 'can', order: 0 },
   GREEN: { colour: '#22a06b', label: 'Green lateral', glyph: 'cone', order: 1 },
-  NORTH: { colour: '#efc63d', label: 'North cardinal', glyph: 'letter', order: 2 },
-  SOUTH: { colour: '#efc63d', label: 'South cardinal', glyph: 'letter', order: 3 },
-  WEST: { colour: '#efc63d', label: 'West cardinal', glyph: 'letter', order: 4 },
-  EAST: { colour: '#efc63d', label: 'East cardinal', glyph: 'letter', order: 5 },
-  BOAT: { colour: '#f08a24', label: 'Vessel', glyph: 'hull', order: 6 },
-  LAND: { colour: '#a9764b', label: 'Land', glyph: 'block', order: 7 },
+  NORTH: { colour: '#efc63d', label: 'North cardinal', glyph: 'letter', letter: 'N', order: 2 },
+  SOUTH: { colour: '#efc63d', label: 'South cardinal', glyph: 'letter', letter: 'S', order: 3 },
+  WEST: { colour: '#efc63d', label: 'West cardinal', glyph: 'letter', letter: 'W', order: 4 },
+  EAST: { colour: '#efc63d', label: 'East cardinal', glyph: 'letter', letter: 'E', order: 5 },
+  // A mark that reads black-and-yellow before the camera has committed to which
+  // of the four it is. This is the *ordinary* state of a cardinal for the first
+  // seconds it is in view — the classifier wants several agreeing votes before
+  // it commits — so it gets its own honest marker rather than falling through to
+  // "Unknown". The question mark is the point: it says the boat can see a
+  // cardinal and cannot yet read its topmark, which is exactly the state in
+  // which it falls back to the planned side.
+  CARDINAL: {
+    colour: '#efc63d',
+    label: 'Cardinal, side unknown',
+    glyph: 'letter',
+    letter: '?',
+    order: 6,
+  },
+  BOAT: { colour: '#f08a24', label: 'Vessel', glyph: 'hull', order: 7 },
+  LAND: { colour: '#a9764b', label: 'Land', glyph: 'block', order: 8 },
   DOCKING_CENTER: { colour: '#9a6ce0', label: 'Dock centre', glyph: 'target', order: 9 },
 };
 
@@ -41,8 +55,15 @@ export function labelOf(track) {
   return styleOf(track).label;
 }
 
-export const CARDINALS = new Set(['NORTH', 'SOUTH', 'EAST', 'WEST']);
+/** The four resolved cardinals, plus the one whose side is not yet known. */
+export const CARDINALS = new Set(['NORTH', 'SOUTH', 'EAST', 'WEST', 'CARDINAL']);
 export const LATERALS = new Set(['RED', 'GREEN']);
+
+/** The character drawn inside a cardinal's marker. */
+export function letterOf(track) {
+  const style = styleOf(track);
+  return style.letter ?? nameOf(track)[0];
+}
 
 /** Legend entries, ordered, limited to the types actually on screen. */
 export function legendFor(tracks) {

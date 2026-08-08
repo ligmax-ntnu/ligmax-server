@@ -1872,3 +1872,317 @@
   .container,
   .header-inner { width: min(1720px, 100% - 1.5rem); }
 }
+
+/* --- autonomy -------------------------------------------------------- */
+/*
+ * The panel that answers "what is the boat doing, and why".
+ *
+ * NJORD §11.4 scores decision-making transparency as its own line, and the
+ * reason sentence is the thing being scored — so it gets more room than any
+ * number on the page, and it stays legible at a distance. `data-level` on the
+ * root is the whole visual state machine: one attribute drives the accent, the
+ * left rule and the headline colour, so a mode and its colour cannot disagree.
+ */
+
+.ap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ap-accent, var(--muted));
+  background: var(--bg-soft);
+}
+
+.ap[data-level='run'] { --ap-accent: var(--ok); background: var(--ok-soft); }
+.ap[data-level='hold'] { --ap-accent: var(--warn); background: var(--warn-soft); }
+.ap[data-level='blocked'] { --ap-accent: var(--danger); background: var(--danger-soft); }
+.ap[data-level='done'] { --ap-accent: var(--brand-500); background: var(--blue-soft); }
+.ap[data-level='idle'],
+.ap[data-level='none'] { --ap-accent: var(--muted); background: var(--bg-sunk); }
+
+.ap-headline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ap-mode {
+  font-size: 1.15rem;
+  font-weight: 750;
+  line-height: 1.15;
+  color: var(--ap-accent);
+}
+
+/* The 20-second window in §8.2 is running. It has to be impossible to miss on a
+   screen being watched from behind someone's shoulder, hence the pulse. */
+.ap-stuck {
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  animation: ap-pulse 1s steps(1) infinite;
+}
+
+@keyframes ap-pulse {
+  0%, 100% { background: var(--danger); }
+  50% { background: var(--danger-strong); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ap-stuck { animation: none; }
+}
+
+/* The sentence the behaviour wrote this tick. Large, because it is the point. */
+.ap-reason {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.ap-blocked {
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--radius-xs);
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
+  color: var(--danger);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.ap-progress { display: flex; flex-direction: column; gap: 0.3rem; }
+
+.ap-progress-text {
+  font-size: 0.85rem;
+  color: var(--body);
+  line-height: 1.4;
+}
+
+.ap-wp {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* The role of the leg being flown, in the same colour the chart draws it. */
+.ap-role {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #10182c;
+  background: var(--role, var(--muted));
+}
+
+/* NJORD §8.2's re-entry point: where to put the boat back after a takeover. */
+.ap-passed {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.ap-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  overflow: hidden;
+}
+
+.ap-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: width 0.4s ease;
+}
+
+.ap-sees {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.ap-sees:empty { display: none; }
+
+.ap-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.35rem;
+}
+
+.ap-actions .btn.is-on {
+  border-color: var(--ap-accent);
+  color: var(--ap-accent);
+  box-shadow: inset 0 0 0 1px var(--ap-accent);
+}
+
+.ap-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.ap-detail {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.7rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.ap-detail dt { color: var(--muted); }
+
+.ap-detail dd {
+  margin: 0;
+  color: var(--body);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* --- the course editor ----------------------------------------------- */
+
+.course-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-bottom: 0.6rem;
+}
+
+.course-meta .field { flex: 1 1 10rem; }
+
+.field--block { flex: 1 1 100%; }
+
+.course-actions,
+.course-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.course-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.wp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 26rem;
+  overflow-y: auto;
+}
+
+/*
+ * One waypoint per row. The left rule is the role's colour — the same colour the
+ * chart draws that leg in, so a role picked here and a leg seen there are
+ * recognisably the same thing without reading either label.
+ */
+.wp-row {
+  display: grid;
+  grid-template-columns: 1.6rem 6rem minmax(9rem, 1fr) 9rem auto auto;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--role, var(--muted));
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+}
+
+.wp-index {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-align: right;
+}
+
+.wp-num {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.wp-num-label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.wp-num .input { width: 4.2rem; }
+
+.wp-tools {
+  display: flex;
+  gap: 0.15rem;
+  justify-content: flex-end;
+}
+
+.icon-btn--sm {
+  min-width: 1.6rem;
+  height: 1.6rem;
+  font-size: 0.8rem;
+}
+
+/* The tracker's own sentence about an object, under the field list. */
+.map-tooltip-why {
+  margin: 0.4rem 0 0;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--panel-line);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  font-style: italic;
+}
+
+/* Placement on the control page. The autopilot panel sits in the command column,
+   where the operator's hands already are; the course editor is a worktable and
+   takes the full width, like the tuning bench. */
+.control-grid > .card--autopilot { grid-column: 1; }
+.control-grid > .card--course { grid-column: 1 / -1; }
+
+@media (max-width: 1150px) {
+  .control-grid > .card--autopilot,
+  .control-grid > .card--course {
+    grid-column: 1;
+    grid-row: auto;
+  }
+}
+
+/* Below this the six-column waypoint row stops fitting, so it reflows into two
+   lines rather than shrinking every field into uselessness. This is the phone
+   case, and the phone case is the one that matters: the course is typed in on a
+   dock at 08:15. */
+@media (max-width: 900px) {
+  .wp-row {
+    grid-template-columns: 1.6rem 1fr auto;
+    grid-template-areas:
+      'index name tools'
+      'coord coord coord'
+      'role role role';
+    row-gap: 0.3rem;
+  }
+
+  .wp-index { grid-area: index; }
+  .wp-name { grid-area: name; }
+  .wp-coord { grid-area: coord; }
+  .wp-role { grid-area: role; }
+  .wp-tools { grid-area: tools; }
+  .wp-num { grid-column: 1 / -1; }
+}

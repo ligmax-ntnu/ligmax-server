@@ -9,6 +9,13 @@ class Enviroment:
 
 
 class ObstacleType(Enum):
+    """Mirror of ligmax-pi/nodes/self_driving/obsticales.py.
+
+    **The numbers are a wire format.** The vessel sends the integer and this
+    dashboard switches on it, so the original members keep their values for
+    ever: append, never renumber, never reuse.
+    """
+
     UNKNOWN = 0
 
     RED = 1
@@ -21,6 +28,14 @@ class ObstacleType(Enum):
     BOAT = 7
     LAND = 8
     DOCKING_CENTER = 9
+
+    # A mark that reads black-and-yellow before the camera has committed to
+    # which of the four cardinals it is. The classifier needs several agreeing
+    # votes (`perception/classify.py`), so this is the *ordinary* state of a
+    # cardinal for the first seconds it is in view - not an error case, and it
+    # has to be drawable, because "cardinal, side unknown" is a far more useful
+    # thing to put in front of an operator than "unknown object".
+    CARDINAL = 10
 
 
 class Boat():

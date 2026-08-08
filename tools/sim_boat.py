@@ -96,6 +96,18 @@ WAYPOINTS = [(0.0, 20.0), (-1.0, 45.0), (1.2, 70.0), (-2.0, 95.0),
 IDEAL_ROUTE = [(0.0, 0.0), *[((rx + gx) / 2.0, (ry + gy) / 2.0)
                              for rx, ry, gx, gy in GATES], (0.0, 152.0)]
 
+# What each leg of that route is *for*. A Njord course is a list of places plus
+# the rules in force between them, and the roles are what the chart colours its
+# legs by - so the simulator has to carry them or the whole waypoint-role layer
+# is invisible until a real boat is on the water. Shaped like an actual course:
+# blind GNSS off the start, buoy rules up the channel, a collision-avoidance leg
+# where the Otter would be, then the dock.
+#
+# Must be the same length as IDEAL_ROUTE, and mirrors the names in
+# `ligmax_gui/plan.py`'s ROLES.
+ROUTE_ROLES = ["transit", "buoys", "buoys", "avoid", "buoys", "hold", "dock"]
+ROUTE_NAMES = ["1", "1.1", "1.2", "2", "2.1", "3", "4"]
+
 # How the simulated pack behaves. The real figures come off the Daly BMS over
 # CAN (`ligmax-pi/nodes/io_manager/battery.py`); these exist to move the widgets.
 PACK_CELLS = 12
@@ -195,6 +207,16 @@ class Sim:
         self.tuning = dict(TUNING_DEFAULTS)
         self.tuning_writes = 0
         self.last_param_write = None
+        # The autonomy node's own state, so the autopilot panel and the
+        # role-coloured course layer can be worked on with no boat present. The
+        # cursor is separate from `waypoint_index` because the two count
+        # different things: that one indexes the planner's nudged targets, this
+        # one indexes the course as it was laid.
+        self.autopilot_engaged = False
+        self.autopilot_paused = False
+        self.autopilot_stuck = False
+        self.recording = False
+        self.plan_index = 0
 
     # -- motion -------------------------------------------------------------
 
@@ -226,9 +248,11 @@ class Sim:
             if driving and distance <= 1.2 and self.goto is None:
                 if self.waypoint_index < len(WAYPOINTS) - 1:
                     self.waypoint_index += 1
+                    self.plan_index = min(self.plan_index + 1, len(ROUTE_ROLES) - 1)
                     events.append(("INFO", f"waypoint {self.waypoint_index} reached"))
                 else:
                     self.waypoint_index = 0
+                    self.plan_index = 0
                     self.x, self.y = 0.0, 0.0
                     events.append(("INFO", "course complete, restarting run"))
             elif self.goto is not None and distance <= 1.2:
@@ -453,8 +477,94 @@ class Sim:
                 "points": [list(point) for point in IDEAL_ROUTE],
                 "kind": "reference",
                 "label": "Ideal route (GNSS)",
+                # The role and the label of each waypoint, in lockstep with the
+                # points - see `ligmax-pi/nodes/self_driving/plan.py`'s
+                # `reference_layer()`, which is what a real vessel sends.
+                "roles": list(ROUTE_ROLES),
+                "names": list(ROUTE_NAMES),
+                "indices": list(range(len(IDEAL_ROUTE))),
+                "target_index": self.plan_index,
+                "passed_index": self.plan_index - 1,
             }
         ]
+
+    def autopilot(self) -> dict:
+        """`telemetry.autopilot`, shaped like the autonomy node's own block.
+
+        Mirrors `ligmax-pi/nodes/self_driving/pilot.py:telemetry()`. The reason
+        sentence is the field that matters - NJORD §11.4 scores it - so it is
+        written the way a behaviour would write it, in words, rather than being
+        a mode name repeated back.
+        """
+        index = min(self.plan_index, len(ROUTE_ROLES) - 1)
+        role = ROUTE_ROLES[index]
+        tx, ty = IDEAL_ROUTE[index]
+        distance = math.hypot(tx - self.x, ty - self.y)
+
+        reasons = {
+            "transit": f"running on GNSS to {ROUTE_NAMES[index]}, {distance:.0f} m to go",
+            "buoys": "red buoy to port, green to starboard - holding the gate centre",
+            "avoid": "vessel crossing from starboard - giving way, turning to pass astern",
+            "hold": "arrived; holding station until told otherwise",
+            "dock": "berth found from the lidar, 2.0 m gap - lining up bow-in",
+        }
+
+        if self.estop:
+            mode, reason, blocked = "BLOCKED", "propulsion power is cut", "E-stop engaged"
+        elif not self.autopilot_engaged:
+            mode, reason, blocked = (
+                "IDLE",
+                "observing only - press Engage to start the course",
+                None,
+            )
+        elif self.autopilot_paused:
+            mode, reason, blocked = "PAUSED", "holding station at the operator's request", None
+        elif self.plan_index >= len(ROUTE_ROLES):
+            mode, reason, blocked = "FINISHED", "course complete", None
+        else:
+            mode, reason, blocked = "RUNNING", reasons.get(role, "under way"), None
+
+        block = {
+            "mode": mode,
+            "reason": reason,
+            "stuck": self.autopilot_stuck,
+            "behaviour": role,
+            "sees": f"{len(self.tracks())}x tracked mark",
+            "plan": {
+                "name": "sim course",
+                "waypoints": len(ROUTE_ROLES),
+                "index": self.plan_index,
+                "current": ROUTE_NAMES[index],
+                "role": role,
+                "last_passed": ROUTE_NAMES[self.plan_index - 1] if self.plan_index else None,
+                "finished": self.plan_index >= len(ROUTE_ROLES),
+            },
+            "distance_to_waypoint": round(distance, 1),
+            "bearing_to_waypoint": round(
+                math.degrees(math.atan2(tx - self.x, ty - self.y)) % 360.0, 1
+            ),
+            "commander": {
+                "engaged": self.autopilot_engaged,
+                "intent": "goto" if mode == "RUNNING" else "hold",
+                "speed_cmd": round(self.speed, 2),
+            },
+            "recording": (
+                {"recording": True, "file": "sim-run.jsonl.gz"}
+                if self.recording
+                else {"recording": False}
+            ),
+            "perception": {
+                "front_clusters": len(self.tracks()),
+                "aft_clusters": max(0, len(self.tracks()) - 3),
+                "tracks": len(self.tracks()),
+                "confirmed": len(self.tracks()),
+                "edge": "connected",
+            },
+            "bus": {"hz": 9.9},
+        }
+        if blocked:
+            block["blocked"] = blocked
+        return block
 
     def telemetry(self) -> dict:
         now = time.time() - self.t0
@@ -635,6 +745,13 @@ class Sim:
                 **({"last_write": self.last_param_write} if self.last_param_write else {}),
             },
             "bilge": {"pump_1": False, "pump_2": False, "water_detected": False},
+            # The block the autopilot panel is built on. On a real vessel this
+            # comes from `nodes/self_driving/`, published at 2 Hz.
+            "autopilot": self.autopilot(),
+            # What io_manager says about the link to that node. Present because
+            # "the autonomy node is not running" and "the node bus is broken"
+            # look identical without it.
+            "autopilot_bridge": {"state": "connected", "hz": 9.9},
         }
 
     # -- operator commands --------------------------------------------------
@@ -678,6 +795,79 @@ class Sim:
         if name == "recentre_origin":
             self.x, self.y = 0.0, 0.0
             return "acked", "grid origin re-zeroed"
+        # --- the autonomy node ---------------------------------------------
+        #
+        # Acked the way the real node acks: in words, and refusing where it would
+        # refuse. `set_plan` in particular echoes back the shape of what it was
+        # given, because that ack is the operator's only confirmation that the
+        # roles arrived the way they were typed.
+        if name == "set_plan":
+            plan = args.get("plan") or args
+            waypoints = plan.get("waypoints") or []
+            if not waypoints:
+                return "failed", "a plan needs at least one waypoint"
+            shape: dict[str, int] = {}
+            for waypoint in waypoints:
+                role = str(waypoint.get("role", "transit"))
+                shape[role] = shape.get(role, 0) + 1
+            self.plan_index = 0
+            self.autopilot_paused = False
+            return "acked", (
+                f"loaded {len(waypoints)} waypoints: "
+                + ", ".join(f"{n}x {role}" for role, n in sorted(shape.items()))
+            )
+        if name == "clear_plan":
+            self.autopilot_engaged = False
+            self.plan_index = 0
+            return "acked", "plan cleared"
+        if name == "autopilot_start":
+            if self.estop:
+                return "failed", "E-stop is engaged"
+            if not self.armed:
+                # The real pilot arms as part of engaging; this refusal exists so
+                # the panel's "refuses with a readable reason" path is reachable.
+                self.armed = True
+            self.autopilot_engaged = True
+            self.autopilot_paused = False
+            self.recording = True
+            self.mode = "AUTONOMOUS"
+            return "acked", "engaged - GUIDED requested, armed, recording started"
+        if name == "autopilot_stop":
+            self.autopilot_engaged = False
+            self.autopilot_paused = False
+            self.recording = False
+            self.mode = "HOLD"
+            return "acked", "disengaged, holding"
+        if name == "autopilot_pause":
+            if not self.autopilot_engaged:
+                return "failed", "not engaged"
+            self.autopilot_paused = True
+            return "acked", "holding station"
+        if name == "autopilot_resume":
+            self.autopilot_paused = False
+            return "acked", "carrying on"
+        if name == "autopilot_skip":
+            self.plan_index = min(self.plan_index + 1, len(ROUTE_ROLES) - 1)
+            self.waypoint_index = min(self.waypoint_index + 1, len(WAYPOINTS) - 1)
+            return "acked", f"skipped to {ROUTE_NAMES[self.plan_index]}"
+        if name == "autopilot_back":
+            self.plan_index = max(0, self.plan_index - 1)
+            self.waypoint_index = max(0, self.waypoint_index - 1)
+            return "acked", f"back to {ROUTE_NAMES[self.plan_index]}"
+        if name == "autopilot_goto":
+            index = int(args.get("index", 0))
+            if not (0 <= index < len(ROUTE_ROLES)):
+                return "failed", f"there is no waypoint {index}"
+            self.plan_index = index
+            return "acked", f"cursor at {ROUTE_NAMES[index]}"
+        if name == "record_start":
+            self.recording = True
+            return "acked", "recording"
+        if name == "record_stop":
+            self.recording = False
+            return "acked", "recording closed"
+        if name == "forget_world":
+            return "acked", "world model cleared"
         if name == "set_param":
             # The server has already checked the name and the range, so anything
             # arriving here is legal. The real vessel refuses a read-only
@@ -713,6 +903,13 @@ class Sim:
                     return "failed", "lose_control wants a number of seconds"
                 self.lost_until = time.time() + seconds
                 return "acked", f"faking loss of control for {seconds:.0f} s"
+            # The other hook worth having: `{"stuck": true}` raises the autopilot
+            # panel's STUCK flag, which is NJORD §8.2's twenty-second window
+            # starting. There is no way to see that alarm otherwise without
+            # actually driving the boat into a corner.
+            if isinstance(payload, dict) and "stuck" in payload:
+                self.autopilot_stuck = bool(payload["stuck"])
+                return "acked", f"stuck flag {'set' if self.autopilot_stuck else 'cleared'}"
             return "acked", f"ignored raw payload: {payload!r}"
         return "failed", f"simulator does not implement '{name}'"
 
