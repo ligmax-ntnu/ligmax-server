@@ -125,10 +125,14 @@ const FIELDS = {
   // ESP32. This is here so a mismatch between the status and the actual colour is
   // visible rather than something only a person on the pontoon can see.
   'lights.colour': { label: 'Showing', kind: 'text' },
-  'lights.mode': { label: 'ESP32 mode', digits: 0 },
   'lights.for_status': { label: 'Set for', kind: 'text' },
   'lights.link': { label: 'Lights link', kind: 'bool', goodWhen: true },
-  'lights.acks': { label: 'Acks', digits: 0 },
+  'lights.frames': { label: 'Frames sent', digits: 0 },
+  // /led_control's switch and loaded pattern, added 2026-08-08. `override: true`
+  // is expected on the bench and worth a second look anywhere else - see
+  // testing.md §8's "confirm the switch is standard" line.
+  'lights.override': { label: 'Custom pattern on', kind: 'bool', goodWhen: false },
+  'lights.pattern_frames': { label: 'Pattern frames', digits: 0 },
 
   'autonomy.planner': { label: 'Planner', kind: 'text' },
   'autonomy.replans': { label: 'Replans', digits: 0 },

@@ -1,0 +1,661 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>led_control — ligmax</title>
+
+<!--
+  Author LED patterns - a solid colour, a per-pixel array, or a looping
+  multi-frame animation - and push them to the real hull ESP32 for testing.
+
+  Deliberately off to the side of the ordinary dashboard (see server.py's
+  comment by this route): reached only by URL, never linked from `/` or
+  `/control`. Standalone like `/debug/lidar_viz` - one file, no shared
+  frontend modules - and it needed no new backend reads to get there: this
+  just polls the existing `/api/session` and `/api/snapshot`, and sends
+  through the existing `/api/command` (`set_lights_mode`, `set_lights_pattern`).
+
+  The strip is drawn as 101 LEDs in four groups - 28, 23, 22, 28 - in the same
+  order `lights.py`'s DATA/COL frames use (wire index 0..100). The last two
+  groups (22, 28) are exactly `lights_esp.ino`'s own right-side split (its
+  `renderFrame()` MAP 2 / MAP 3); the first two (28, 23) split the left side's
+  LEFT_LEDS=51 the same way. Nothing here invents a hardware fact beyond that.
+
+  Safety: KILLED always overrides the switch below - enforced in `lights.py`
+  itself (`_tick()`), not in this page, so it holds even if this page is
+  wrong, offline, or being actively misused. See lights.py's "Admin
+  test-pattern override" section for the guarantee this page is the front end
+  of.
+-->
+
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d131f;
+    --panel-2: #0a0f19;
+    --ink: #d7e3f5;
+    --dim: #7d8ea8;
+    --line: #1b2941;
+    --accent: #7fd4ff;
+    --warn: #f0b23c;
+    --bad: #e2453f;
+    --ok: #4fd07a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 40px;
+  }
+
+  header#bar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 20px; background: rgba(7, 11, 18, .92); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line);
+  }
+  header#bar h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .02em; }
+  header#bar .left, header#bar .right { display: flex; align-items: center; gap: 10px; }
+
+  .pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: rgba(79, 208, 122, .4); }
+  .pill.bad { color: var(--bad); border-color: rgba(226, 69, 63, .4); }
+  .pill.warn { color: var(--warn); border-color: rgba(240, 178, 60, .4); }
+  .pill.accent { color: var(--accent); border-color: rgba(127, 212, 255, .4); }
+
+  .switch { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .switch-track {
+    width: 38px; height: 20px; border-radius: 999px; background: #1b2941;
+    position: relative; transition: background .15s; flex: none;
+  }
+  .switch-track::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: #8496b3; transition: transform .15s, background .15s;
+  }
+  .switch input:checked + .switch-track { background: rgba(240, 178, 60, .35); }
+  .switch input:checked + .switch-track::after { transform: translateX(18px); background: var(--warn); }
+  .switch input:disabled + .switch-track { opacity: .5; cursor: not-allowed; }
+  .switch .side.on { color: var(--ink); font-weight: 600; }
+
+  #readonly-banner {
+    background: rgba(240, 178, 60, .12); border: 1px solid rgba(240, 178, 60, .4);
+    color: var(--warn); padding: 8px 14px; border-radius: 8px; font-size: 12px;
+    margin: 16px 20px 0; max-width: 1100px; margin-left: auto; margin-right: auto;
+  }
+  #readonly-banner.hidden, .hidden { display: none !important; }
+
+  main { max-width: 1100px; margin: 20px auto 0; padding: 0 20px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+
+  .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  input[type=color] {
+    width: 36px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px;
+    background: none; cursor: pointer;
+  }
+  .swatches { display: flex; gap: 6px; }
+  .swatch { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--line); cursor: pointer; padding: 0; }
+  .swatch:hover:not(:disabled) { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  button {
+    font: inherit; font-size: 12.5px; color: var(--ink); background: #141d2e;
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: rgba(127, 212, 255, .15); border-color: var(--accent); color: var(--accent); }
+  button.tool-btn.active { background: rgba(240, 178, 60, .2); border-color: var(--warn); color: var(--warn); }
+  button.link { background: none; border: none; color: var(--dim); text-decoration: underline; padding: 0; }
+
+  .strip-wrap { overflow-x: auto; padding: 6px 2px 14px; }
+  .strip { display: flex; gap: 20px; width: max-content; touch-action: none; user-select: none; }
+  .group { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .group-label { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .group-leds { display: flex; gap: 2px; }
+  .led { width: 13px; height: 24px; border-radius: 2px; background: #111; border: 1px solid #1e2a3d; cursor: pointer; }
+  .led:hover { border-color: var(--accent); }
+  body.readonly .led { cursor: not-allowed; }
+
+  .hint { font-size: 12px; color: var(--dim); margin: 6px 0 0; }
+
+  .frames-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .frames-toolbar .spacer { flex: 1 1 auto; }
+  .frames-toolbar .loop-total { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .filmstrip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+  .thumb {
+    flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 5px;
+    padding: 7px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; background: var(--panel-2);
+  }
+  .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .thumb canvas { width: 101px; height: 16px; image-rendering: pixelated; border-radius: 3px; display: block; }
+  .thumb-row { display: flex; align-items: center; gap: 4px; }
+  .hold-input {
+    width: 58px; background: var(--bg); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 4px; padding: 2px 4px; font-size: 11px; text-align: right;
+  }
+  .ms-label { font-size: 10px; color: var(--dim); }
+
+  .send-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  #send-status.ok { color: var(--ok); }
+  #send-status.bad { color: var(--bad); }
+  #send-status.muted { color: var(--dim); }
+</style>
+
+<header id="bar">
+  <div class="left">
+    <h1>led_control</h1>
+    <span id="link-pill" class="pill">connecting…</span>
+    <span id="role-pill" class="pill">read-only</span>
+  </div>
+  <div class="right">
+    <span id="shown-pill" class="pill">hull: unknown</span>
+    <label class="switch" title="Standard = the vessel's own status colour. Custom = the pattern below. KILLED always wins regardless.">
+      <span class="side" id="side-standard">standard</span>
+      <input type="checkbox" id="mode-toggle">
+      <span class="switch-track"></span>
+      <span class="side" id="side-custom">custom</span>
+    </label>
+    <button id="logout-btn" class="link">log out</button>
+  </div>
+</header>
+
+<div id="readonly-banner" class="hidden">
+  Read-only session — every control below is disabled. Open this page with
+  <code>?key=&lt;admin key&gt;</code> to make changes.
+</div>
+
+<main>
+  <section class="card">
+    <h2>Paint</h2>
+    <div class="toolbar">
+      <input type="color" id="colour-picker" value="#ff0000" class="admin-only">
+      <div class="swatches" id="swatches"></div>
+      <button id="btn-fill" class="admin-only">Fill all</button>
+      <button id="btn-clear" class="admin-only">Clear all</button>
+      <button id="btn-eyedrop" class="admin-only tool-btn">Eyedropper</button>
+    </div>
+    <div class="strip-wrap">
+      <div class="strip" id="strip"></div>
+    </div>
+    <p class="hint">
+      Click or drag across LEDs to paint them the current colour. Groups shown
+      as counted on the boat: 28 · 23 · 22 · 28 (101 LEDs total, wire order
+      left to right).
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Frames</h2>
+    <div class="frames-toolbar">
+      <button id="btn-add-frame" class="admin-only">+ Frame</button>
+      <button id="btn-dup-frame" class="admin-only">Duplicate</button>
+      <button id="btn-move-left" class="admin-only">◀ Move</button>
+      <button id="btn-move-right" class="admin-only">Move ▶</button>
+      <button id="btn-del-frame" class="admin-only">Delete</button>
+      <span class="spacer"></span>
+      <button id="btn-preview">▶ Preview</button>
+      <span class="loop-total" id="loop-total"></span>
+    </div>
+    <div class="filmstrip" id="filmstrip"></div>
+    <p class="hint">
+      One frame is a static colour or picture. Two or more, each with its own
+      hold time, loop as an animation once sent. Preview plays locally in the
+      browser and never touches the boat.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Send</h2>
+    <div class="send-row">
+      <button id="btn-send" class="admin-only primary">Send pattern to boat</button>
+      <span id="send-status" class="muted"></span>
+    </div>
+    <p class="hint">
+      Loads the pattern on the vessel but does not display it unless the
+      switch above is set to "custom" - and never while the boat is KILLED,
+      whatever the switch says. That guarantee lives on the vessel itself, in
+      <code>lights.py</code>, not in this page.
+    </p>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  // Wire index order, per lights.py/lights_esp.ino - see the top-of-file comment.
+  const GROUPS = [28, 23, 22, 28];
+  const NUM_LEDS = GROUPS.reduce((a, b) => a + b, 0); // 101 - must match
+                                                       // ligmax-server's LIGHTS_NUM_LEDS
+                                                       // and lights.py's NUM_LEDS default
+  const OFF = '#000000';
+  const SWATCHES = ['#ff0000', '#ff8800', '#ffff00', '#00ff00', '#00ffff', '#0066ff', '#aa00ff', '#ffffff', '#000000'];
+  const DEFAULT_HOLD_MS = 500;
+  const MIN_HOLD_MS = 20, MAX_HOLD_MS = 60000;
+
+  const $ = (id) => document.getElementById(id);
+  const strip = $('strip');
+  const filmstrip = $('filmstrip');
+  const swatchesEl = $('swatches');
+  const colourPicker = $('colour-picker');
+  const linkPill = $('link-pill');
+  const rolePill = $('role-pill');
+  const shownPill = $('shown-pill');
+  const modeToggle = $('mode-toggle');
+  const readonlyBanner = $('readonly-banner');
+  const sendStatus = $('send-status');
+  const loopTotal = $('loop-total');
+
+  /* --- state ------------------------------------------------------------ */
+
+  let admin = false;
+  let modeRequestPending = false;
+  let pendingCommandId = null;
+
+  let frames = [{ pixels: Array(NUM_LEDS).fill(OFF), holdMs: DEFAULT_HOLD_MS }];
+  let activeFrame = 0;
+  let currentColour = '#ff0000';
+  let tool = 'paint'; // or 'eyedrop'
+  let painting = false;
+  let previewing = false;
+  let previewTimer = null;
+  let previewFrameIdx = 0;
+
+  let ledEls = [];       // flat, index === wire index
+  let filmCells = [];    // parallel to `frames`
+
+  /* --- the strip ---------------------------------------------------------- */
+
+  function buildStrip() {
+    strip.innerHTML = '';
+    ledEls = [];
+    let idx = 0;
+    for (const count of GROUPS) {
+      const group = document.createElement('div');
+      group.className = 'group';
+      const label = document.createElement('div');
+      label.className = 'group-label';
+      label.textContent = String(count);
+      group.appendChild(label);
+      const row = document.createElement('div');
+      row.className = 'group-leds';
+      for (let i = 0; i < count; i++) {
+        const led = document.createElement('div');
+        led.className = 'led';
+        led.dataset.idx = String(idx++);
+        row.appendChild(led);
+        ledEls.push(led);
+      }
+      group.appendChild(row);
+      strip.appendChild(group);
+    }
+  }
+
+  function paintGridFrom(pixels) {
+    for (let i = 0; i < ledEls.length; i++) ledEls[i].style.background = pixels[i];
+  }
+
+  function renderActiveFrame() { paintGridFrom(frames[activeFrame].pixels); }
+
+  function ledAt(clientX, clientY) {
+    const el = document.elementFromPoint(clientX, clientY);
+    return el && el.classList.contains('led') ? el : null;
+  }
+
+  function paintLed(led) {
+    const idx = Number(led.dataset.idx);
+    if (frames[activeFrame].pixels[idx] === currentColour) return;
+    frames[activeFrame].pixels[idx] = currentColour;
+    led.style.background = currentColour;
+    refreshThumb(activeFrame);
+  }
+
+  function pickColour(led) {
+    const idx = Number(led.dataset.idx);
+    currentColour = frames[activeFrame].pixels[idx];
+    colourPicker.value = currentColour;
+    setTool('paint');
+  }
+
+  strip.addEventListener('pointerdown', (event) => {
+    if (!admin) return;
+    const led = ledAt(event.clientX, event.clientY);
+    if (!led) return;
+    if (previewing) stopPreview();
+    if (tool === 'eyedrop') { pickColour(led); return; }
+    painting = true;
+    paintLed(led);
+    event.preventDefault();
+  });
+  strip.addEventListener('pointermove', (event) => {
+    if (!painting) return;
+    const led = ledAt(event.clientX, event.clientY);
+    if (led) paintLed(led);
+  });
+  window.addEventListener('pointerup', () => { painting = false; });
+  window.addEventListener('pointercancel', () => { painting = false; });
+
+  /* --- colour picking ----------------------------------------------------- */
+
+  function buildSwatches() {
+    swatchesEl.innerHTML = '';
+    for (const hex of SWATCHES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'swatch admin-only';
+      b.style.background = hex;
+      b.title = hex;
+      b.disabled = !admin;
+      b.addEventListener('click', () => {
+        if (!admin) return;
+        currentColour = hex;
+        colourPicker.value = hex;
+      });
+      swatchesEl.appendChild(b);
+    }
+  }
+
+  colourPicker.addEventListener('input', () => { currentColour = colourPicker.value; });
+
+  function setTool(next) {
+    tool = next;
+    $('btn-eyedrop').classList.toggle('active', tool === 'eyedrop');
+  }
+  $('btn-eyedrop').addEventListener('click', () => {
+    if (!admin) return;
+    setTool(tool === 'eyedrop' ? 'paint' : 'eyedrop');
+  });
+
+  function fillActive(hex) {
+    if (!admin) return;
+    stopPreview();
+    frames[activeFrame].pixels = Array(NUM_LEDS).fill(hex);
+    renderActiveFrame();
+    refreshThumb(activeFrame);
+  }
+  $('btn-fill').addEventListener('click', () => fillActive(currentColour));
+  $('btn-clear').addEventListener('click', () => fillActive(OFF));
+
+  /* --- frames / filmstrip -------------------------------------------------- */
+
+  function drawThumb(canvas, pixels) {
+    const ctx = canvas.getContext('2d');
+    for (let i = 0; i < pixels.length; i++) {
+      ctx.fillStyle = pixels[i];
+      ctx.fillRect(i, 0, 1, canvas.height);
+    }
+  }
+
+  function refreshThumb(i) {
+    const cell = filmCells[i];
+    if (!cell) return;
+    drawThumb(cell.querySelector('canvas'), frames[i].pixels);
+  }
+
+  function clampHold(value) {
+    value = Math.round(Number(value));
+    if (!Number.isFinite(value)) value = DEFAULT_HOLD_MS;
+    return Math.min(MAX_HOLD_MS, Math.max(MIN_HOLD_MS, value));
+  }
+
+  function updateLoopTotal() {
+    const totalMs = frames.reduce((s, f) => s + f.holdMs, 0);
+    loopTotal.textContent = `${frames.length} frame${frames.length === 1 ? '' : 's'}, ${(totalMs / 1000).toFixed(1)}s loop`;
+  }
+
+  function buildFilmstrip() {
+    filmstrip.innerHTML = '';
+    filmCells = [];
+    frames.forEach((f, i) => {
+      const cell = document.createElement('div');
+      cell.className = 'thumb' + (i === activeFrame ? ' active' : '');
+
+      const canvas = document.createElement('canvas');
+      canvas.width = NUM_LEDS; canvas.height = 16;
+      cell.appendChild(canvas);
+      drawThumb(canvas, f.pixels);
+
+      const row = document.createElement('div');
+      row.className = 'thumb-row';
+      const holdInput = document.createElement('input');
+      holdInput.type = 'number';
+      holdInput.min = String(MIN_HOLD_MS); holdInput.max = String(MAX_HOLD_MS); holdInput.step = '10';
+      holdInput.value = String(f.holdMs);
+      holdInput.className = 'hold-input admin-only';
+      holdInput.disabled = !admin;
+      holdInput.addEventListener('click', (e) => e.stopPropagation());
+      holdInput.addEventListener('change', () => {
+        f.holdMs = clampHold(holdInput.value);
+        holdInput.value = String(f.holdMs);
+        updateLoopTotal();
+      });
+      row.appendChild(holdInput);
+      const ms = document.createElement('span');
+      ms.className = 'ms-label'; ms.textContent = 'ms';
+      row.appendChild(ms);
+      cell.appendChild(row);
+
+      cell.addEventListener('click', () => setActiveFrame(i));
+      filmstrip.appendChild(cell);
+      filmCells.push(cell);
+    });
+    updateLoopTotal();
+  }
+
+  function setActiveFrame(i) {
+    if (i < 0 || i >= frames.length) return;
+    stopPreview();
+    activeFrame = i;
+    filmCells.forEach((c, idx) => c.classList.toggle('active', idx === i));
+    renderActiveFrame();
+  }
+
+  $('btn-add-frame').addEventListener('click', () => {
+    if (!admin) return;
+    const base = frames[activeFrame].pixels.slice();
+    frames.splice(activeFrame + 1, 0, { pixels: base, holdMs: DEFAULT_HOLD_MS });
+    activeFrame += 1;
+    buildFilmstrip();
+    renderActiveFrame();
+  });
+  $('btn-dup-frame').addEventListener('click', () => $('btn-add-frame').click());
+  $('btn-del-frame').addEventListener('click', () => {
+    if (!admin || frames.length <= 1) return;
+    frames.splice(activeFrame, 1);
+    activeFrame = Math.max(0, activeFrame - 1);
+    buildFilmstrip();
+    renderActiveFrame();
+  });
+  $('btn-move-left').addEventListener('click', () => moveFrame(-1));
+  $('btn-move-right').addEventListener('click', () => moveFrame(1));
+  function moveFrame(delta) {
+    if (!admin) return;
+    const j = activeFrame + delta;
+    if (j < 0 || j >= frames.length) return;
+    const [f] = frames.splice(activeFrame, 1);
+    frames.splice(j, 0, f);
+    activeFrame = j;
+    buildFilmstrip();
+  }
+
+  /* --- local preview -------------------------------------------------------- */
+
+  const previewBtn = $('btn-preview');
+  function startPreview() {
+    if (!frames.length) return;
+    previewing = true;
+    previewBtn.textContent = '■ Stop';
+    previewFrameIdx = activeFrame;
+    const step = () => {
+      const f = frames[previewFrameIdx];
+      paintGridFrom(f.pixels);
+      previewTimer = setTimeout(() => {
+        previewFrameIdx = (previewFrameIdx + 1) % frames.length;
+        step();
+      }, f.holdMs);
+    };
+    step();
+  }
+  function stopPreview() {
+    if (!previewing) return;
+    previewing = false;
+    previewBtn.textContent = '▶ Preview';
+    clearTimeout(previewTimer);
+    renderActiveFrame();
+  }
+  previewBtn.addEventListener('click', () => (previewing ? stopPreview() : startPreview()));
+
+  /* --- sending -------------------------------------------------------------- */
+
+  function isSolid(pixels) { return pixels.every((p) => p === pixels[0]); }
+  function hexBody(hex) { return hex.replace('#', '').toUpperCase(); }
+
+  async function postCommand(name, args) {
+    const res = await fetch('/api/command', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, args }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  $('btn-send').addEventListener('click', async () => {
+    if (!admin) return;
+    stopPreview();
+    const btn = $('btn-send');
+    btn.disabled = true;
+    sendStatus.textContent = 'sending…';
+    sendStatus.className = 'muted';
+    try {
+      const wireFrames = frames.map((f) => ({
+        pixels: isSolid(f.pixels) ? hexBody(f.pixels[0]) : f.pixels.map(hexBody),
+        hold_ms: f.holdMs,
+      }));
+      const body = await postCommand('set_lights_pattern', { frames: wireFrames });
+      pendingCommandId = body.command.id;
+      sendStatus.textContent = `sent — command #${body.command.id}`;
+      sendStatus.className = 'muted';
+    } catch (err) {
+      sendStatus.textContent = 'failed: ' + (err.message || err);
+      sendStatus.className = 'bad';
+    } finally {
+      btn.disabled = !admin;
+    }
+  });
+
+  modeToggle.addEventListener('change', async () => {
+    if (!admin) { modeToggle.checked = !modeToggle.checked; return; }
+    const custom = modeToggle.checked;
+    modeToggle.disabled = true;
+    modeRequestPending = true;
+    try {
+      await postCommand('set_lights_mode', { custom });
+    } catch (err) {
+      modeToggle.checked = !custom; // revert on refusal
+      sendStatus.textContent = 'mode switch failed: ' + (err.message || err);
+      sendStatus.className = 'bad';
+    } finally {
+      modeToggle.disabled = !admin;
+      modeRequestPending = false;
+    }
+  });
+
+  /* --- admin gating ---------------------------------------------------------- */
+
+  function applyAdmin(isAdmin) {
+    admin = isAdmin;
+    document.body.classList.toggle('readonly', !isAdmin);
+    document.querySelectorAll('.admin-only').forEach((el) => { el.disabled = !isAdmin; });
+    modeToggle.disabled = !isAdmin;
+    rolePill.textContent = isAdmin ? 'admin' : 'read-only';
+    rolePill.className = 'pill ' + (isAdmin ? 'ok' : 'warn');
+    readonlyBanner.classList.toggle('hidden', isAdmin);
+  }
+
+  $('logout-btn').addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+    location.reload();
+  });
+
+  /* --- polling: /api/session (admin) and /api/snapshot (live hull state) ---- */
+
+  async function pollSession() {
+    try {
+      const res = await fetch('/api/session', { credentials: 'same-origin' });
+      const body = await res.json();
+      applyAdmin(!!body.admin);
+    } catch (err) { /* leave the last known role in place */ }
+  }
+
+  function updateFromSnapshot(snapshot) {
+    const stats = snapshot.stats || {};
+    const telemetry = (snapshot.state && snapshot.state.telemetry) || {};
+    const lights = telemetry.lights || {};
+    const connected = !!stats.connected;
+
+    linkPill.textContent = connected ? 'vessel up' : 'vessel DOWN';
+    linkPill.className = 'pill ' + (connected ? 'ok' : 'bad');
+
+    if (!connected || !('colour' in lights)) {
+      shownPill.textContent = 'hull: unknown';
+      shownPill.className = 'pill warn';
+    } else {
+      const custom = lights.colour === 'custom';
+      shownPill.textContent = 'hull: ' + lights.colour + (lights.for_status ? ` (${lights.for_status})` : '');
+      shownPill.className = 'pill ' + (custom ? 'accent' : 'ok');
+    }
+
+    if (!modeRequestPending) modeToggle.checked = !!lights.override;
+    $('side-standard').classList.toggle('on', !modeToggle.checked);
+    $('side-custom').classList.toggle('on', modeToggle.checked);
+
+    if (pendingCommandId) {
+      const cmd = (snapshot.commands || []).find((c) => c.id === pendingCommandId);
+      if (cmd && cmd.status !== 'queued' && cmd.status !== 'delivered') {
+        sendStatus.textContent = cmd.status + (cmd.result ? ': ' + cmd.result : '');
+        sendStatus.className = cmd.status === 'acked' ? 'ok' : 'bad';
+        pendingCommandId = null;
+      }
+    }
+  }
+
+  let fetchingSnapshot = false;
+  async function pollSnapshot() {
+    if (fetchingSnapshot) return;
+    fetchingSnapshot = true;
+    try {
+      const res = await fetch('/api/snapshot', { credentials: 'same-origin' });
+      if (res.status === 401) {
+        applyAdmin(false);
+        linkPill.textContent = 'locked';
+        linkPill.className = 'pill bad';
+        return;
+      }
+      updateFromSnapshot(await res.json());
+    } catch (err) {
+      linkPill.textContent = 'error: ' + (err.message || err);
+      linkPill.className = 'pill bad';
+    } finally {
+      fetchingSnapshot = false;
+    }
+  }
+
+  /* --- boot ------------------------------------------------------------------ */
+
+  buildStrip();
+  buildSwatches();
+  buildFilmstrip();
+  renderActiveFrame();
+  applyAdmin(false); // safe default until /api/session says otherwise
+  pollSession();
+  pollSnapshot();
+  setInterval(pollSession, 5000);
+  setInterval(pollSnapshot, 1000);
+})();
+</script>

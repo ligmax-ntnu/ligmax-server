@@ -115,6 +115,17 @@ export function resolve(store) {
  * Does the hull agree with the status? `telemetry.lights.colour` is what the
  * lights ESP32 was last told to show, reported back up by the Pi.
  *
+ * Three outcomes, not two: `true`/`false` for agreement, plus `'custom'` when
+ * an admin has switched `/led_control`'s override on and the hull is showing
+ * a hand-authored pattern instead - a deliberate, acknowledged divergence, not
+ * the fault `false` means.
+ *
+ * `lights.py` guarantees the hull never shows `'custom'` while the vessel is
+ * KILLED - that is the one thing `/led_control`'s switch cannot override. So
+ * `'custom'` reported *during* KILLED is not the benign case above, it is that
+ * guarantee having failed, which is exactly the kind of fault this check
+ * exists to catch - hence `false`, not `'custom'`, right below.
+ *
  * Returns null when there is nothing to compare, so a boat with no lights node
  * yet does not produce a permanent warning.
  */
@@ -123,5 +134,6 @@ export function lightsAgree(store, status) {
   if (typeof shown !== 'string' || !status) return null;
   const expected = metaFor(status).light;
   if (!expected) return null;
+  if (shown === 'custom') return status === 'KILLED' ? false : 'custom';
   return shown === expected;
 }

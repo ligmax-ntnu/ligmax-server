@@ -93,17 +93,27 @@ export function updateHeader(store) {
   }
 
   // A hull showing the wrong colour is a safety-visible fault, so it is called
-  // out rather than left for someone to spot in the telemetry panel.
+  // out rather than left for someone to spot in the telemetry panel. A hull
+  // showing an admin's /led_control test pattern is a different thing - an
+  // acknowledged divergence, not a fault - so it gets its own quieter pill
+  // rather than the alarm styling `agrees === false` gets.
   const lightsPill = $('lights-pill');
   if (lightsPill) {
     const agrees = lightsAgree(store, status.status);
     const shown = store.telemetry('lights.colour');
-    lightsPill.hidden = agrees !== false;
+    lightsPill.hidden = agrees !== false && agrees !== 'custom';
+    lightsPill.classList.toggle('pill--alarm', agrees === false);
+    lightsPill.classList.toggle('pill--note', agrees === 'custom');
     if (agrees === false) {
       lightsPill.textContent = `Lights show ${shown}`;
       lightsPill.title =
         `The hull is showing ${shown} but the status is ${status.meta.label}, which should be ` +
         `${status.meta.lightName}. Check the lights ESP32 link.`;
+    } else if (agrees === 'custom') {
+      lightsPill.textContent = 'Lights: custom pattern';
+      lightsPill.title =
+        `An admin has switched the hull to a /led_control test pattern instead of ` +
+        `${status.meta.lightName}. It still shows solid red immediately if the boat is KILLED.`;
     }
   }
 

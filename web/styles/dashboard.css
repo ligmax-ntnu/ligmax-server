@@ -143,7 +143,9 @@
 /* The status indicator. Coloured off `data-level`, which status.js derives from
    the same five states that pick the colour of the lights on the hull — so the
    pill and the boat are meant to match, and `#lights-pill` appears when they do
-   not. Levels: ok / warn / idle / danger / offline. */
+   not (`.pill--alarm`) or when an admin's /led_control override is why they
+   don't (`.pill--note`, not an alarm - see status.js's `lightsAgree()`).
+   Levels: ok / warn / idle / danger / offline. */
 .pill--status {
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -202,6 +204,15 @@
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
   font-weight: 700;
+}
+
+/* The hull showing an admin's /led_control test pattern instead of the status
+   colour - a deliberate, acknowledged divergence, not a fault, so this is the
+   quiet blue of .pill--mode rather than .pill--alarm's red. */
+.pill--note {
+  color: var(--ink);
+  background: var(--blue-soft);
+  border-color: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

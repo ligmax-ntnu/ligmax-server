@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -68,6 +69,16 @@ DEPLOY_LINK_WINDOW = 20.0
 # Mirrors ligmax-pi/nodes/io_manager/mission.py's MAX_WAYPOINTS - reject an
 # oversized mission here rather than let it reach the vessel and fail there.
 MAX_MISSION_WAYPOINTS = 100
+
+# Mirrors ligmax-pi/nodes/io_manager/lights.py's NUM_LEDS/MAX_PATTERN_FRAMES/
+# MIN_HOLD_S/MAX_HOLD_S defaults - the /led_control validation below and the
+# vessel's own are meant to refuse the same payloads, so a malformed pattern
+# gets a 400 here instead of a silent "pattern rejected" three hops away.
+LIGHTS_NUM_LEDS = 101
+MAX_LIGHT_FRAMES = 60
+MIN_LIGHT_HOLD_MS = 20
+MAX_LIGHT_HOLD_MS = 60_000
+_HEX_COLOUR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
@@ -126,6 +137,23 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # every connect and once a minute anyway; this is the button for after someone
     # has been editing parameters in Mission Planner.
     "get_params": {"label": "Reload tuning from the vessel", "args": {}},
+    # The /led_control switch: standard (status-driven, the default) vs. an
+    # admin's authored test pattern. `lights.py` refuses to honour this at all
+    # while the boat is KILLED, whatever it is set to - that guarantee lives on
+    # the vessel, not here, so it holds even if this dashboard is compromised.
+    "set_lights_mode": {
+        "label": "Lights: standard / custom",
+        "args": {"custom": "any"},
+        "log_level": "WARN",
+    },
+    # The pattern itself - a solid colour, a per-pixel array, or a looping
+    # multi-frame animation - authored on /led_control. Fully validated below
+    # rather than left to the vessel to discover is malformed.
+    "set_lights_pattern": {
+        "label": "Send light pattern",
+        "args": {"frames": "any"},
+        "log_level": "WARN",
+    },
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
 }
 
@@ -556,6 +584,28 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    # -- the LED pattern editor -----------------------------------------------
+    #
+    # `/led_control` lets an admin paint a solid colour, a per-pixel array, or a
+    # looping multi-frame animation and push it to the hull ESP32 for real, over
+    # the same `/api/command` path as everything else (`set_lights_mode` for the
+    # standard/custom switch, `set_lights_pattern` for the frames). Standalone
+    # like `/debug/lidar_viz`: one HTML file, no shared frontend modules.
+    #
+    # Deliberately not linked from `/` or `/control` - reached only by URL. The
+    # KILLED override in lights.py is the safety guarantee; keeping this off the
+    # pages a marshal or a teammate is actually looking at is the second one.
+
+    @app.get("/led_control")
+    def led_control() -> Response:
+        if (response := consume_key_param(url_for("led_control"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "led_control.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     # -- telemetry in from the vessel ---------------------------------------
 
     @app.post("/api/ingest")
@@ -665,11 +715,68 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 cleaned_points.append([x, y])
             cleaned["points"] = cleaned_points
 
+        if name == "set_lights_pattern":
+            # Mirrors ligmax-pi/nodes/io_manager/lights.py's `_parse_pattern()` -
+            # deliberately, so a malformed pattern is a 400 here rather than a
+            # "pattern rejected" the operator has to go find in the vessel log.
+            frames = cleaned.get("frames")
+            if not isinstance(frames, list) or not frames:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'frames' must be a non-empty list"}
+                ), 400
+            if len(frames) > MAX_LIGHT_FRAMES:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": f"a pattern may have at most {MAX_LIGHT_FRAMES} frames"}
+                ), 400
+            cleaned_frames: list[dict[str, Any]] = []
+            for i, entry in enumerate(frames):
+                if not isinstance(entry, dict):
+                    return jsonify({"error": f"frame {i} is not an object"}), 400  # type: ignore[return-value]
+                try:
+                    hold_ms = float(entry.get("hold_ms"))
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"frame {i} has a bad hold_ms"}), 400  # type: ignore[return-value]
+                if not (MIN_LIGHT_HOLD_MS <= hold_ms <= MAX_LIGHT_HOLD_MS):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": f"frame {i} hold_ms must be between "
+                                  f"{MIN_LIGHT_HOLD_MS} and {MAX_LIGHT_HOLD_MS}"}
+                    ), 400
+                pixels = entry.get("pixels")
+                if isinstance(pixels, str):
+                    swatch = [pixels]
+                elif isinstance(pixels, list):
+                    if len(pixels) != LIGHTS_NUM_LEDS:
+                        return jsonify(  # type: ignore[return-value]
+                            {"error": f"frame {i} has {len(pixels)} pixels, "
+                                      f"want {LIGHTS_NUM_LEDS}"}
+                        ), 400
+                    swatch = pixels
+                else:
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": f"frame {i} pixels must be a hex string or a list"}
+                    ), 400
+                for value in swatch:
+                    if not _HEX_COLOUR_RE.match(str(value)):
+                        return jsonify(  # type: ignore[return-value]
+                            {"error": f"frame {i} has a bad colour {value!r}"}
+                        ), 400
+                cleaned_frames.append({"pixels": pixels, "hold_ms": hold_ms})
+            cleaned["frames"] = cleaned_frames
+
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
         level = spec.get("log_level") or ("ERROR" if spec.get("danger") else "INFO")
+        # A pattern's `frames` can run to hundreds of hex strings - dumping the
+        # whole thing into the log the way every other command's args are
+        # logged would bury the one line worth grepping for later.
+        if name == "set_lights_pattern":
+            frames = cleaned.get("frames") or []
+            loop_s = sum(f.get("hold_ms", 0) for f in frames) / 1000.0
+            logged_args = f"{{'frames': {len(frames)} frame(s), {loop_s:.1f}s loop}}"
+        else:
+            logged_args = cleaned or ""
         store.add_log(
             level,
-            f"operator command {name} {cleaned or ''}".strip() + f" [{_client_ip()}]",
+            f"operator command {name} {logged_args}".strip() + f" [{_client_ip()}]",
             "gui.command",
         )
         return jsonify({"ok": True, "command": queued.to_ui()})
