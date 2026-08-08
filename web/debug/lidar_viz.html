@@ -1,0 +1,453 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lidar_viz — ligmax</title>
+
+<!--
+  The boat and its lidar returns. Nothing else.
+
+  No chart, no imagery, no telemetry panels, no navigation, no commands. This
+  answers the one question the map cannot: is the thing seeing what I think it
+  is seeing, at the right distance, on the right side. It answers it with no
+  GNSS fix, no grid origin and no autopilot, because the vessel publishes its
+  sweeps in the BOAT frame — [starboard, forward] metres from the datum — and
+  this page plots that directly, bow up. A bench has none of the other three.
+
+  Deliberately standalone: one file, no imports, no shared modules, its own
+  endpoint (`/api/debug/lidar`). A debug tool whose first dependency is the
+  thing being debugged is not much of a debug tool.
+
+  Everything drawn here is measured or published. The boat glyph is a fixed
+  pixel marker rather than a hull to scale, because the hull's real dimensions
+  are not in any repo and a plausible-looking invented one would be read off
+  this page as a measurement. The two crosses ARE real: they come from
+  `telemetry.lidar.geometry`, which is what the vessel is actually applying.
+-->
+
+<style>
+  :root {
+    --bg: #070b12;
+    --ink: #d7e3f5;
+    --dim: #7d8ea8;
+    --line: #1b2941;
+    --front: #7fd4ff;
+    --aft: #8fa8c8;
+    --warn: #f0b23c;
+    --bad: #e2453f;
+    --ok: #4fd07a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+
+  #hud {
+    position: fixed; top: 0; left: 0; padding: 10px 14px;
+    background: linear-gradient(180deg, rgba(7,11,18,.92), rgba(7,11,18,0));
+    pointer-events: none; white-space: pre; text-shadow: 0 1px 2px #000;
+  }
+  #hud b { color: #fff; font-weight: 600; }
+  #hud .k { color: var(--dim); }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+
+  #keys {
+    position: fixed; bottom: 0; left: 0; padding: 8px 14px;
+    color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000;
+  }
+  #paused {
+    position: fixed; top: 12px; right: 16px; padding: 4px 10px;
+    border: 1px solid var(--warn); color: var(--warn); border-radius: 3px;
+    letter-spacing: .08em; display: none;
+  }
+  #paused.on { display: block; }
+</style>
+
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="paused">PAUSED</div>
+<div id="keys">wheel zoom &nbsp;·&nbsp; drag pan &nbsp;·&nbsp; <b>p</b> pause &nbsp;·&nbsp; <b>r</b> reset &nbsp;·&nbsp; <b>c</b> colour &nbsp;·&nbsp; <b>f</b>/<b>a</b> front/aft &nbsp;·&nbsp; <b>h</b> hud</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+
+  // The C1 reaches 12 m, so 30 m across shows the whole of both sensors with
+  // room to spare and still resolves a 3 cm return as more than one pixel.
+  const DEFAULT_SPAN_M = 30;
+
+  const view = {
+    span: DEFAULT_SPAN_M,   // metres across the shorter screen axis
+    panX: 0, panY: 0,       // pixels
+    colour: true,
+    front: true,
+    aft: true,
+    hud: true,
+    paused: false,
+  };
+
+  let data = null;          // newest /api/debug/lidar payload
+  let lastVersion = -1;
+  let dirty = true;
+  let fetching = false;
+  let netError = null;
+  let fetches = 0, updates = 0;
+  let rateWindow = [];      // arrival times of genuinely new versions
+
+  /* --- geometry -------------------------------------------------------- */
+
+  let W = 0, H = 0, ppm = 1, cx = 0, cy = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    dirty = true;
+  }
+
+  /** Boat frame -> screen. +forward is UP, +starboard is RIGHT. */
+  function place(starboard, forward) {
+    return [cx + starboard * ppm, cy - forward * ppm];
+  }
+
+  /* --- data ------------------------------------------------------------ */
+
+  async function poll() {
+    if (fetching || view.paused) return;
+    fetching = true;
+    try {
+      const response = await fetch('/api/debug/lidar', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const next = await response.json();
+      fetches++;
+      netError = null;
+      if (next.v !== lastVersion) {
+        lastVersion = next.v;
+        updates++;
+        const now = performance.now();
+        rateWindow.push(now);
+        while (rateWindow.length && now - rateWindow[0] > 3000) rateWindow.shift();
+        dirty = true;
+      }
+      data = next;
+      dirty = true;   // the HUD's ages tick even when the sweep has not changed
+    } catch (err) {
+      netError = String(err.message || err);
+      dirty = true;
+    } finally {
+      fetching = false;
+    }
+  }
+
+  /** Observed update rate, over a 3 s window — what the plot is ACTUALLY doing. */
+  function observedHz() {
+    if (rateWindow.length < 2) return 0;
+    const span = (rateWindow[rateWindow.length - 1] - rateWindow[0]) / 1000;
+    return span > 0 ? (rateWindow.length - 1) / span : 0;
+  }
+
+  /**
+   * A sweep's points as [starboard, forward] pairs.
+   *
+   * Boat-frame sweeps — what the real vessel sends — need nothing doing to
+   * them, which is the whole reason this page works on a bench. A grid-frame
+   * sweep (`tools/sim_boat.py` used to send these, and might again) is rotated
+   * back into the boat frame here so both look the same on screen; without a
+   * vessel pose there is no way to do that, and it is skipped rather than
+   * drawn somewhere invented.
+   */
+  function toBoatFrame(scan, boat) {
+    if (scan.frame !== 'grid') return scan.points;
+    if (!boat?.position) return null;
+    const [px, py] = boat.position;
+    const [hx, hy] = boat.heading ?? [0, 1];
+    return scan.points.map(([x, y]) => {
+      const dx = x - px, dy = y - py;
+      return [dx * hy - dy * hx, dx * hx + dy * hy];
+    });
+  }
+
+  /* --- drawing --------------------------------------------------------- */
+
+  const RING_STEPS = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100];
+
+  function ringStep() {
+    // Aim for a ring about every 70 px.
+    return RING_STEPS.find((s) => s * ppm >= 70) ?? RING_STEPS[RING_STEPS.length - 1];
+  }
+
+  function drawRings() {
+    const step = ringStep();
+    const reach = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy)) / ppm;
+    ctx.lineWidth = 1;
+    ctx.font = '10px ui-monospace, monospace';
+    for (let r = step; r <= reach; r += step) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * ppm, 0, Math.PI * 2);
+      ctx.strokeStyle = '#152238';
+      ctx.stroke();
+      ctx.fillStyle = '#33445e';
+      ctx.fillText(r % 1 === 0 ? `${r} m` : `${r.toFixed(2)} m`, cx + 4, cy - r * ppm - 3);
+    }
+    // Fore/aft and port/starboard lines, so a bearing can be read by eye.
+    ctx.strokeStyle = '#152238';
+    ctx.beginPath();
+    ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
+    ctx.moveTo(0, cy); ctx.lineTo(W, cy);
+    ctx.stroke();
+  }
+
+  function drawPoints() {
+    if (!data) return;
+    const boat = data.boat;
+    // `scan` (singular) is the older single-sweep field; drawn too, so this
+    // page is useful against a vessel that only sends that.
+    const sweeps = [...(data.scans ?? []), data.scan].filter((s) => s?.points?.length);
+    const size = ppm > 12 ? 3 : ppm > 5 ? 2 : 1.5;
+
+    for (const sweep of sweeps) {
+      const isAft = sweep.source === 'aft_lidar';
+      if (isAft && !view.aft) continue;
+      if (!isAft && !view.front) continue;
+
+      const points = toBoatFrame(sweep, boat);
+      if (!points) continue;
+
+      const fallback = isAft ? '#8fa8c8' : '#7fd4ff';
+      const rgb = sweep.rgb?.length === sweep.points.length * 3 ? sweep.rgb : null;
+      let fill = null;
+
+      for (let i = 0; i < points.length; i++) {
+        const [sx, sy] = place(points[i][0], points[i][1]);
+        if (sx < -4 || sy < -4 || sx > W + 4 || sy > H + 4) continue;
+        // A negative channel is "no camera coloured this return" — the ordinary
+        // case, since the lenses cover a small part of a 360 degree rotation.
+        const r = view.colour && rgb ? rgb[i * 3] : -1;
+        const next = r < 0 ? fallback : `rgb(${r}, ${rgb[i * 3 + 1]}, ${rgb[i * 3 + 2]})`;
+        if (next !== fill) { fill = next; ctx.fillStyle = next; }
+        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+      }
+    }
+  }
+
+  /**
+   * The datum, the two lidar units, and the vessel's own safety radius.
+   *
+   * The glyph is fixed pixels, not a hull to scale: the real hull dimensions
+   * are not in any repo, and a plausible invented outline would be read off
+   * this page as a measurement. The two crosses are real — they are the
+   * offsets the vessel is applying right now, straight out of
+   * `telemetry.lidar.geometry`.
+   */
+  function drawBoat() {
+    const geometry = data?.lidar?.geometry;
+    const radius = data?.boat?.radius;
+
+    if (radius > 0) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * ppm, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,.16)';
+      ctx.setLineDash([3, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (geometry) {
+      const units = [
+        ['front', geometry.front_forward_m, '#7fd4ff'],
+        ['aft', geometry.aft_forward_m, '#8fa8c8'],
+      ];
+      for (const [label, forward, colour] of units) {
+        if (typeof forward !== 'number') continue;
+        const [sx, sy] = place(0, forward);
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(sx - 5, sy); ctx.lineTo(sx + 5, sy);
+        ctx.moveTo(sx, sy - 5); ctx.lineTo(sx, sy + 5);
+        ctx.stroke();
+        ctx.fillStyle = colour;
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillText(`${label} ${forward > 0 ? '+' : ''}${forward} m`, sx + 8, sy + 3);
+      }
+    }
+
+    // Bow-up datum marker, fixed size.
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 11);
+    ctx.lineTo(cx + 7, cy + 8);
+    ctx.lineTo(cx, cy + 4);
+    ctx.lineTo(cx - 7, cy + 8);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  }
+
+  /* --- HUD ------------------------------------------------------------- */
+
+  function span(text, cls) { return `<span class="${cls}">${text}</span>`; }
+
+  function num(value, digits = 1, suffix = '') {
+    return typeof value === 'number' && isFinite(value)
+      ? value.toFixed(digits) + suffix : '—';
+  }
+
+  function drawHud() {
+    if (!view.hud) { hud.innerHTML = ''; return; }
+    if (netError) {
+      hud.innerHTML = span(`/api/debug/lidar: ${netError}`, 'bad');
+      return;
+    }
+    if (!data) { hud.innerHTML = '<span class="k">connecting…</span>'; return; }
+
+    const lidar = data.lidar ?? {};
+    const front = lidar.front ?? {};
+    const aft = lidar.aft ?? {};
+    const stats = data.stats ?? {};
+    const rows = [];
+
+    const age = stats.last_frame_age;
+    const linkClass = !stats.connected ? 'bad' : age > 3 ? 'warn' : 'ok';
+    rows.push(
+      `<b>vessel</b>  ${span(stats.connected ? 'up' : 'DOWN', linkClass)}` +
+      `  frames ${num(stats.hz, 1, ' Hz')}  age ${num(age, 1, ' s')}` +
+      `  plot ${num(observedHz(), 1, ' Hz')}`
+    );
+
+    const jetson = front.connected ? 'up' : front.listening ? 'waiting' : 'DOWN';
+    rows.push(
+      `<b>front</b>   ${span(jetson, front.connected ? 'ok' : 'bad')}` +
+      ` :${front.port ?? '—'}` +
+      `  pts ${lidar.front_points ?? 0}` +
+      `  coloured ${front.sweep_coloured ?? '—'}/${front.sweep_points ?? '—'}` +
+      `  ${num(front.sweep_hz, 1, ' Hz')}` +
+      `  skew ${(front.skew_ms ?? []).map((s) => num(s, 0)).join('/') || '—'} ms` +
+      `  sweeps ${front.sweeps ?? 0}  frames ${front.frames ?? 0}`
+    );
+
+    rows.push(
+      `<b>aft</b>     ${span(aft.healthy ? 'up' : 'DOWN', aft.healthy ? 'ok' : 'bad')}` +
+      `  pts ${lidar.aft_points ?? 0}` +
+      `  ${num(aft.hz, 1, ' Hz')}` +
+      `  age ${num(aft.age_s, 2, ' s')}` +
+      `  errors ${aft.errors ?? 0}`
+    );
+
+    const geometry = lidar.geometry;
+    if (geometry) {
+      rows.push(
+        `<span class="k">geometry</span> front ${geometry.front_forward_m} m` +
+        `  aft ${geometry.aft_forward_m} m` +
+        `  aft yaw ${geometry.aft_yaw_deg}°` +
+        `  <span class="k">(hand-measured, unverified)</span>`
+      );
+    }
+
+    const off = [!view.front && 'front', !view.aft && 'aft', !view.colour && 'colour']
+      .filter(Boolean);
+    rows.push(
+      `<span class="k">view</span> ${num(view.span, 1, ' m')} across` +
+      `  ring ${ringStep()} m` +
+      (off.length ? span(`  hidden: ${off.join(', ')}`, 'warn') : '')
+    );
+
+    for (const message of failures(front, aft, data)) rows.push(span(message, 'warn'));
+    hud.innerHTML = rows.join('\n');
+  }
+
+  /** The handful of "you are looking at nothing, and here is why" cases. */
+  function failures(front, aft, payload) {
+    const out = [];
+    const sweeps = [...(payload.scans ?? []), payload.scan].filter((s) => s?.points?.length);
+    if (!sweeps.length) {
+      out.push('no sweeps in the frame — is the vessel publishing `scans`?');
+    }
+    if (front.listening && !front.connected) {
+      out.push(`nothing has dialled in to :${front.port} — is the Jetson running run.sh?`);
+    }
+    if (front.connected && !front.sweeps) {
+      out.push('Jetson connected but sending no sweeps — start it with LIDAR=1 ./run.sh');
+    }
+    if (front.last_error) out.push(`front: ${front.last_error}`);
+    if (aft.last_error && !aft.healthy) out.push(`aft: ${aft.last_error}`);
+    if (sweeps.some((s) => s.frame === 'grid') && !payload.boat?.position) {
+      out.push('a grid-frame sweep was skipped: no vessel position to rotate it against');
+    }
+    return out;
+  }
+
+  /* --- loop ------------------------------------------------------------ */
+
+  function render() {
+    if (dirty) {
+      dirty = false;
+      ppm = Math.min(W, H) / view.span;
+      cx = W / 2 + view.panX;
+      cy = H / 2 + view.panY;
+      ctx.fillStyle = '#070b12';
+      ctx.fillRect(0, 0, W, H);
+      drawRings();
+      drawPoints();
+      drawBoat();
+      drawHud();
+    }
+    requestAnimationFrame(render);
+  }
+
+  /* --- input ----------------------------------------------------------- */
+
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const factor = Math.exp(event.deltaY * 0.0012);
+    view.span = Math.min(400, Math.max(1, view.span * factor));
+    dirty = true;
+  }, { passive: false });
+
+  let dragging = null;
+  canvas.addEventListener('pointerdown', (event) => {
+    dragging = { x: event.clientX, y: event.clientY };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    view.panX += event.clientX - dragging.x;
+    view.panY += event.clientY - dragging.y;
+    dragging = { x: event.clientX, y: event.clientY };
+    dirty = true;
+  });
+  canvas.addEventListener('pointerup', () => { dragging = null; });
+
+  window.addEventListener('keydown', (event) => {
+    const key = event.key.toLowerCase();
+    if (key === 'p') {
+      view.paused = !view.paused;
+      document.getElementById('paused').classList.toggle('on', view.paused);
+    } else if (key === 'r') {
+      view.span = DEFAULT_SPAN_M; view.panX = view.panY = 0;
+    } else if (key === 'c') { view.colour = !view.colour; }
+    else if (key === 'f') { view.front = !view.front; }
+    else if (key === 'a') { view.aft = !view.aft; }
+    else if (key === 'h') { view.hud = !view.hud; }
+    else return;
+    dirty = true;
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  render();
+  // 20 Hz, comfortably above the vessel's 10 Hz publish so the plot is limited
+  // by the boat rather than by this page. `poll()` returns immediately if the
+  // previous request is still outstanding, so a slow link stretches the
+  // interval instead of queueing requests behind each other.
+  poll();
+  setInterval(poll, 50);
+})();
+</script>

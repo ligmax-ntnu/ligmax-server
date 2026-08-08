@@ -48,6 +48,7 @@ export class Store {
       tracks: [],
       paths: [],
       scan: null,
+      scans: [],
       telemetry: {},
     };
     this.stats = { connected: false, hz: 0, frames: 0 };

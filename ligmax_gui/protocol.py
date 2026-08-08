@@ -31,6 +31,12 @@ dribble in partial updates from different subsystems independently.
 
       "path": {"points": [[12, 38], [15, 46]], "target_index": 1},
       "scan": {"points": [[1.2, 4.5], ...], "source": "front_lidar"},
+      "scans": [                              # several sweeps; replaces the list
+        {"source": "front_lidar", "frame": "boat",
+         "points": [[0.3, 4.1], ...],         # [starboard, forward] metres
+         "rgb": [180, 30, 24, -1, -1, -1, ...]},   # flat, 3 per point
+        {"source": "aft_lidar", "frame": "boat", "points": [[-2.0, -6.4], ...]}
+      ],
 
       "telemetry": {"battery": {...}, "gimbal": {...}, ...},
       "logs": [{"t": ..., "level": "INFO", "name": "planner", "msg": "..."}]
@@ -44,6 +50,26 @@ default.  If your grid is rotated relative to true north, send
 underlay will be rotated to match.  ``origin`` georeferences grid (0, 0) —
 that is ``Boat.original_gps_position`` — and is what lets the dashboard put
 the vessel on a real map.
+
+Lidar sweeps
+------------
+``scan`` is one sweep and ``scans`` is a list of them, the same relationship
+``path`` and ``paths`` have.  The vessel carries two: a front unit on the Jetson,
+whose returns arrive already coloured by the cameras, and an aft one on the Pi,
+which has no camera looking its way and never carries colour.  They stay separate
+entries so the operator can tell which sensor is answering — a single merged
+cloud makes a dead lidar look like clear water.
+
+``rgb`` is flat (r, g, b, r, g, b…), three entries per point, and ``-1, -1, -1``
+means *no camera coloured this return* — which is the ordinary case, since most
+of a rotation is behind both lenses.  It is deliberately not black, which a dark
+buoy would also be.
+
+``frame`` says what the points mean: ``grid`` (chart metres, the default) or
+``boat`` (``[starboard, forward]`` metres from the vessel).  The real lidars send
+``boat``, and the dashboard rotates them onto the chart with the vessel's live
+position and heading; a boat-frame sweep is simply not drawn while there is no
+vessel pose to place it against.
 
 ``origin`` and ``boat.position`` are the two fields the chart is drawn from, and
 they are **not** interchangeable with ``telemetry.gps.lat/lon``: the map works in
@@ -427,6 +453,84 @@ def _normalise_path(raw: Any) -> dict[str, Any] | None:
     return path
 
 
+# What a lidar return carries in `rgb` when no camera coloured it. Not black:
+# on this vessel most of a rotation is behind both lenses, so "uncoloured" is
+# the ordinary case, and it must never be confusable with a genuinely dark
+# object. The frontend draws these in the layer's own colour instead.
+SCAN_NO_COLOUR = -1
+
+# Which frame a sweep's points are expressed in.  `grid` is metres in the chart's
+# own coordinates, which is what `tools/sim_boat.py` sends.  `boat` is metres
+# relative to the vessel — `[starboard, forward]` — which is what the real lidars
+# send, because what they measured is a range and a bearing from the hull; the
+# frontend rotates those onto the chart with the vessel's live pose rather than
+# having last second's heading baked in on the boat.
+SCAN_FRAMES = ("grid", "boat")
+
+
+def _channel(value: Any) -> int:
+    """One 0-255 colour channel, or SCAN_NO_COLOUR for anything unusable."""
+    num = _num(value)
+    if num is None or num < 0:
+        return SCAN_NO_COLOUR
+    return min(255, int(num))
+
+
+def _normalise_scan(raw: Any, limit: int | None = 1500) -> dict[str, Any] | None:
+    """Coerce one lidar sweep into the canonical scan shape.
+
+    `rgb` is flat — r, g, b, r, g, b… — so it is three times as long as
+    `points`, and it is decimated in lockstep with them: a colour that drifted
+    one point out of step would tint the whole plot with its neighbour's buoy.
+    A sweep whose `rgb` is not exactly 3x its points is treated as having no
+    colour at all rather than being partially applied.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        raw = {"points": raw}
+    if not isinstance(raw, dict):
+        return None
+
+    values = raw.get("points")
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if not isinstance(values, (list, tuple)):
+        values = []
+
+    colours = raw.get("rgb")
+    if hasattr(colours, "tolist"):
+        colours = colours.tolist()
+    has_colour = isinstance(colours, (list, tuple)) and len(colours) == 3 * len(values)
+
+    step = 1
+    if limit and len(values) > limit:
+        # Even decimation keeps the shape of a lidar scan recognisable.
+        step = math.ceil(len(values) / limit)
+
+    points: list[list[float]] = []
+    rgb: list[int] = []
+    for index in range(0, len(values), step):
+        point = _point(values[index])
+        if point is None:
+            continue
+        points.append(point)
+        if has_colour:
+            rgb.extend(_channel(c) for c in colours[3 * index : 3 * index + 3])
+
+    frame_name = str(raw.get("frame", "grid")).strip().lower()
+    scan: dict[str, Any] = {
+        "points": points,
+        "source": str(raw.get("source", "lidar")),
+        "frame": frame_name if frame_name in SCAN_FRAMES else "grid",
+    }
+    if has_colour:
+        scan["rgb"] = rgb
+    if (coloured := _num(raw.get("coloured"))) is not None:
+        scan["coloured"] = int(coloured)
+    return scan
+
+
 def normalise_frame(raw: dict[str, Any], max_scan_points: int = 1500) -> dict[str, Any]:
     """Validate and canonicalise an inbound frame.
 
@@ -511,16 +615,22 @@ def normalise_frame(raw: dict[str, Any], max_scan_points: int = 1500) -> dict[st
     if paths or "path" in raw or "paths" in raw:
         frame["paths"] = paths
 
+    # `scan` is one sweep and `scans` is a list of them - the same relationship
+    # `path` and `paths` already have. The vessel carries two lidars that arrive
+    # by different routes and only one of them has colour, so they stay separate
+    # entries rather than being concatenated into one anonymous cloud.
     scan = raw.get("scan")
-    if scan is not None:
-        if isinstance(scan, (list, tuple)):
-            scan = {"points": scan}
-        if isinstance(scan, dict):
-            points = _points(scan.get("points"), limit=max_scan_points)
-            frame["scan"] = {
-                "points": points,
-                "source": str(scan.get("source", "lidar")),
-            }
+    if scan is not None and (single := _normalise_scan(scan, max_scan_points)):
+        frame["scan"] = single
+    if isinstance(raw.get("scans"), (list, tuple)):
+        frame["scans"] = [
+            entry
+            for item in raw["scans"][:4]
+            if (entry := _normalise_scan(item, max_scan_points)) is not None
+        ]
+    elif "scans" in raw:
+        # An explicit non-list (usually null) clears every sweep off the chart.
+        frame["scans"] = []
 
     if isinstance(raw.get("telemetry"), dict):
         frame["telemetry"] = _sanitise_telemetry(raw["telemetry"])

@@ -31,7 +31,18 @@ from ligmax_gui.config import load_config  # noqa: E402
 from ligmax_gui.protocol import OBSTACLE_TYPES  # noqa: E402
 
 ORIGIN_LAT, ORIGIN_LON = 63.43049, 10.39506  # Trondheim harbour
-LIDAR_RANGE = 65.0
+LIDAR_RANGE = 65.0  # how far the simulated perception stack *tracks* a mark
+# How far the two lidars actually see. The RPLidar C1's datasheet limit, and a
+# very different number from LIDAR_RANGE above: on a Njord course most of the
+# marks the tracker knows about are well outside it, and the plot should show
+# that rather than imply the boat has 65 m of point cloud.
+MAX_LIDAR_RANGE_M = 12.0
+# Half-angle off the bow within which a lidar return can pick up a camera
+# colour. An approximation for the sim only — the real answer is two fisheyes
+# aimed 15 deg either side of forward, each with an 88 deg valid cone, looking
+# at a 2:1 crop of the sensor (`ligmax-edge/protocol.py`). What matters here is
+# that it is a cone rather than a band, so a mark going abeam goes grey.
+CAMERA_CONE_DEG = 70.0
 MODES = ["MANUAL", "AUTONOMOUS", "HOLD", "DOCKING", "RETURN_HOME"]
 
 # The course: gate pairs up a channel, a cardinal mark, land to port, a
@@ -39,6 +50,20 @@ MODES = ["MANUAL", "AUTONOMOUS", "HOLD", "DOCKING", "RETURN_HOME"]
 GATES = [(-6.0, 20.0, 6.0, 20.0), (-7.0, 45.0, 5.0, 45.0),
          (-5.0, 70.0, 7.5, 70.0), (-8.0, 95.0, 4.0, 95.0),
          (-6.0, 120.0, 6.5, 120.0)]
+
+# Roughly what the Jetson's cameras hand back for a mark of each type. Sensor-
+# native RGB, not calibrated colour: on the real boat these are the same numbers
+# the detection boxes were drawn from (`ligmax-edge/fusion.py`). A type not
+# listed here comes through uncoloured, like the sea does.
+SCAN_COLOURS: dict[int, tuple[int, int, int]] = {
+    OBSTACLE_TYPES["RED"]: (198, 46, 38),
+    OBSTACLE_TYPES["GREEN"]: (36, 168, 84),
+    OBSTACLE_TYPES["NORTH"]: (232, 196, 64),
+    OBSTACLE_TYPES["SOUTH"]: (232, 196, 64),
+    OBSTACLE_TYPES["EAST"]: (232, 196, 64),
+    OBSTACLE_TYPES["WEST"]: (232, 196, 64),
+    OBSTACLE_TYPES["DOCKING_CENTER"]: (206, 206, 214),
+}
 
 COURSE: list[dict] = []
 for _index, (rx, ry, gx, gy) in enumerate(GATES):
@@ -298,30 +323,78 @@ class Sim:
             })
         return out
 
-    def scan(self) -> dict | None:
-        """Synthetic lidar returns: arcs on the near faces of nearby objects."""
+    def scans(self) -> list[dict]:
+        """Both lidars, shaped exactly the way the real vessel sends them.
+
+        The boat carries two RPLidar C1s — a front one on the Jetson, whose
+        returns the cameras have already coloured, and an aft one on the Pi with
+        nothing looking its way — and `ligmax-pi/nodes/io_manager/scan.py` puts
+        both into the BOAT frame before publishing. So does this: points are
+        `[starboard, forward]` metres, and the dashboard does the rotation onto
+        the chart. Simulating the grid-space version instead would leave the one
+        transform most likely to be wrong untested by the sim.
+
+        Range is capped at the C1's real 12 m rather than the 45 m this used to
+        scatter over, so the plot looks like the one the boat will actually
+        produce — on a Njord course that means most marks are out of lidar range
+        and only the near one lights up, which is the honest picture.
+        """
         if not self.with_scan:
-            return None
-        points = []
+            return []
+
+        world: list[tuple[float, float, tuple[int, int, int] | None]] = []
         for item in COURSE:
             tx, ty = item["truth"]
-            distance = math.hypot(tx - self.x, ty - self.y)
-            if distance > 45.0:
+            if math.hypot(tx - self.x, ty - self.y) > MAX_LIDAR_RANGE_M:
                 continue
             bearing = math.atan2(self.y - ty, self.x - tx)
             radius = item["avoid_radius"] * 0.42
             spread = 1.1 if item["type"] == OBSTACLE_TYPES["LAND"] else 0.8
+            colour = SCAN_COLOURS.get(item["type"])
             for _ in range(14):
                 angle = bearing + random.uniform(-spread, spread)
                 jitter = random.gauss(0, 0.045)
-                points.append([tx + math.cos(angle) * (radius + jitter),
-                               ty + math.sin(angle) * (radius + jitter)])
-        for _ in range(45):  # water clutter / spray
+                world.append((tx + math.cos(angle) * (radius + jitter),
+                              ty + math.sin(angle) * (radius + jitter), colour))
+        for _ in range(45):  # water clutter / spray — nothing to colour it with
             angle = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(4.0, 42.0)
-            points.append([self.x + math.cos(angle) * radius,
-                           self.y + math.sin(angle) * radius])
-        return {"points": points, "source": "front_lidar"}
+            radius = random.uniform(1.0, MAX_LIDAR_RANGE_M)
+            world.append((self.x + math.cos(angle) * radius,
+                          self.y + math.sin(angle) * radius, None))
+
+        # World -> boat frame, the exact inverse of what `web/js/map.js` does to
+        # put these back on the chart.
+        hx, hy = math.cos(self.heading), math.sin(self.heading)
+        front: list[list[float]] = []
+        front_rgb: list[int] = []
+        aft: list[list[float]] = []
+        for wx, wy, colour in world:
+            dx, dy = wx - self.x, wy - self.y
+            forward = dx * hx + dy * hy
+            starboard = dx * hy - dy * hx
+            if forward >= 0.0:
+                front.append([round(starboard, 2), round(forward, 2)])
+                # -1 is "no camera coloured this return". Whether a lens covers a
+                # return is an ANGLE off the bow, not a distance abeam: a point
+                # 2 m ahead and 2.5 m to the side is 51 deg out, which no
+                # forward-looking camera sees, however close it is. So a mark
+                # nearly abeam goes grey as the boat draws level with it, which
+                # is what the real rig does too.
+                lit = colour and abs(math.degrees(math.atan2(starboard, forward))) <= CAMERA_CONE_DEG
+                front_rgb.extend(colour if lit else (-1, -1, -1))
+            else:
+                # Nothing looks astern, so these never carry colour at all.
+                aft.append([round(starboard, 2), round(forward, 2)])
+
+        out = []
+        if front:
+            out.append({"source": "front_lidar", "frame": "boat",
+                        "points": front, "rgb": front_rgb,
+                        "coloured": sum(1 for i in range(0, len(front_rgb), 3)
+                                        if front_rgb[i] >= 0)})
+        if aft:
+            out.append({"source": "aft_lidar", "frame": "boat", "points": aft})
+        return out
 
     def path(self) -> dict:
         remaining = WAYPOINTS[self.waypoint_index:]
@@ -651,7 +724,7 @@ def main() -> int:
                 tracks=sim.tracks(),
                 path=sim.path(),
                 paths=sim.paths(),  # the ideal route, drawn against the planned one
-                scan=sim.scan() if scan_divider == 0 else None,
+                scans=sim.scans() if scan_divider == 0 else None,
                 telemetry=sim.telemetry(),
                 status_text=(
                     "EMERGENCY STOP ENGAGED" if sim.estop

@@ -209,6 +209,7 @@ class GuiClient:
         path: Any = None,
         paths: Sequence[Any] | None = None,
         scan: Any = None,
+        scans: Sequence[Any] | None = None,
         telemetry: dict[str, Any] | None = None,
         status: Any = None,
         mode: Any = None,
@@ -251,6 +252,11 @@ class GuiClient:
             frame["paths"] = [_to_jsonable(p) for p in paths]
         if scan is not None:
             frame["scan"] = _to_jsonable(scan)
+        # A list, so it replaces rather than merges: passing `scans=[]` is how a
+        # vessel says its lidars have nothing, which takes the returns off the
+        # chart instead of leaving the last sweep there looking like water.
+        if scans is not None:
+            frame["scans"] = [_to_jsonable(s) for s in scans]
         if telemetry is not None:
             frame["telemetry"] = _to_jsonable(telemetry)
         # `status` is the closed vocabulary (protocol.VESSEL_STATUS) that drives the
@@ -360,13 +366,17 @@ class GuiClient:
         if self.scheme == "udp":
             if len(payload) > _UDP_SAFE_BYTES:
                 # Almost always an oversized lidar scan; drop it, keep the rest.
+                # Both keys: two sweeps of ~400 coloured points overflow a
+                # datagram just as readily as one.
                 frame.pop("scan", None)
+                frame.pop("scans", None)
                 frame.setdefault("logs", []).append(
                     {
                         "level": "WARN",
                         "name": "gui.client",
-                        "msg": f"frame was {len(payload)} B, dropped `scan` to fit "
-                        "a UDP datagram - decimate it on the vessel or use HTTP",
+                        "msg": f"frame was {len(payload)} B, dropped the lidar "
+                        "scans to fit a UDP datagram - decimate them on the "
+                        "vessel or use HTTP",
                         "t": time.time(),
                     }
                 )

@@ -492,6 +492,38 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["Connection"] = "keep-alive"
         return response
 
+    # -- the lidar debug viewer ---------------------------------------------
+    #
+    # `/debug/lidar_viz` is the boat and its lidar returns and nothing else: no
+    # chart, no imagery, no telemetry panels, no navigation. It exists because
+    # the map cannot answer the question you actually have while bolting a lidar
+    # down - "is this thing seeing what I think it is seeing, at the right
+    # distance, on the right side" - and it answers it with no GNSS fix, no grid
+    # origin and no autopilot, none of which a bench has.
+    #
+    # It is deliberately standalone: one HTML file, no imports, its own endpoint.
+    # A debug tool whose first dependency is the thing you are debugging is not
+    # much of a debug tool, so it keeps working when the dashboard's own
+    # frontend does not.
+
+    @app.get("/api/debug/lidar")
+    def debug_lidar() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify(store.lidar_view())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/debug/lidar_viz")
+    def debug_lidar_viz() -> Response:
+        if (response := consume_key_param(url_for("debug_lidar_viz"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "debug/lidar_viz.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     # -- telemetry in from the vessel ---------------------------------------
 
     @app.post("/api/ingest")

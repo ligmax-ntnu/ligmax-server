@@ -121,6 +121,10 @@ class Store:
             "tracks": [],
             "paths": [],
             "scan": None,
+            # One entry per lidar. A list, so a frame replaces it outright
+            # rather than merging - which is what takes a sensor's returns off
+            # the chart when it stops answering (`_merge` below).
+            "scans": [],
             "telemetry": {},
         }
         self._state_version = 0
@@ -359,6 +363,40 @@ class Store:
                 "command_version": self._command_version,
                 "stats_version": self._stats_version,
                 "server_time": time.time(),
+            }
+
+    def lidar_view(self) -> dict[str, Any]:
+        """Just the lidar plot and what it takes to read one — `/api/debug/lidar`.
+
+        A deliberately narrow projection rather than `snapshot()`. The debug
+        viewer polls this many times a second and has no use for the logs, the
+        command list or the sparkline history, which are most of a snapshot's
+        size and nearly all of its cost.
+
+        `v` is the state version, so a poller can tell a genuinely new sweep
+        from the same one fetched twice and skip the redraw.
+        """
+        with self._lock:
+            self._refresh_liveness()
+            telemetry = self.state.get("telemetry") or {}
+            return {
+                "v": self._state_version,
+                "server_time": time.time(),
+                # Copied, not handed out by reference. `_merge` replaces a list
+                # wholesale rather than mutating it, so a reference would in
+                # fact be stable - but that is a property of the merge rule
+                # rather than of this method, and a shallow copy of two entries
+                # costs nothing to not depend on it.
+                "scans": list(self.state.get("scans") or ()),
+                "scan": self.state.get("scan"),
+                "boat": self.state.get("boat"),
+                "status": self.state.get("status"),
+                "lidar": telemetry.get("lidar") or {},
+                "stats": {
+                    "connected": self.stats.get("connected"),
+                    "hz": self.stats.get("hz"),
+                    "last_frame_age": self.stats.get("last_frame_age"),
+                },
             }
 
     def poll(self, cursor: Cursor) -> list[tuple[str, Any]]:

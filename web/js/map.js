@@ -624,15 +624,69 @@ export class WorldMap {
     return path;
   }
 
+  /**
+   * Every lidar sweep the vessel sent, in one plot.
+   *
+   * Two sensors reach here by different routes and look different on purpose:
+   *
+   *   front  on the Jetson, fused with the two cameras there, so a return the
+   *          lenses covered carries that buoy's own colour. Most of a rotation
+   *          is behind both lenses and comes through uncoloured (`-1,-1,-1`) —
+   *          that is the normal case, not a fault, and it draws in the layer's
+   *          cyan.
+   *   aft    on the Pi, facing astern. Nothing looks that way, so it never has
+   *          colour at all. Drawn in a muted slate so "no camera sees back
+   *          there" cannot be mistaken for "the cameras saw nothing here".
+   *
+   * A `boat`-frame sweep is `[starboard, forward]` metres from the hull and is
+   * rotated onto the chart here, with the vessel's live pose, rather than on
+   * the boat — a cloud converted a second ago swings behind the boat through
+   * every turn. It uses `boat.heading ?? [0, 1]`, the same fallback
+   * `_drawBoat` uses for the vessel glyph, so the cloud and the hull it came
+   * off can never end up drawn pointing different ways.
+   */
   _drawScan(ctx, state) {
-    const points = state.scan?.points;
-    if (!points?.length) return;
-    ctx.fillStyle = 'rgba(127, 212, 255, 0.5)';
+    const sweeps = [...(state.scans ?? []), state.scan].filter((s) => s?.points?.length);
+    if (!sweeps.length) return;
+
+    const boat = state.boat;
     const size = this.camera.ppm > 8 ? 2 : 1.5;
-    for (const [x, y] of points) {
-      const [sx, sy] = this.worldToScreen(x, y);
-      if (sx < -8 || sy < -8 || sx > this.width + 8 || sy > this.height + 8) continue;
-      ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+
+    for (const sweep of sweeps) {
+      let place;
+      if (sweep.frame === 'boat') {
+        // No vessel position means no frame to hang these off. Skipping is the
+        // honest answer: the chart has no boat on it either in that state.
+        if (!boat?.position) continue;
+        const [px, py] = boat.position;
+        const [hx, hy] = boat.heading ?? [0, 1];
+        // forward is the heading; starboard is the heading turned 90° right.
+        place = (s, f) => this.worldToScreen(px + f * hx + s * hy, py + f * hy - s * hx);
+      } else {
+        place = (x, y) => this.worldToScreen(x, y);
+      }
+
+      const fallback =
+        sweep.source === 'aft_lidar' ? 'rgba(143, 168, 200, 0.5)' : 'rgba(127, 212, 255, 0.5)';
+      const rgb = sweep.rgb?.length === sweep.points.length * 3 ? sweep.rgb : null;
+      let fill = null;
+
+      sweep.points.forEach(([a, b], index) => {
+        const [sx, sy] = place(a, b);
+        if (sx < -8 || sy < -8 || sx > this.width + 8 || sy > this.height + 8) return;
+        // A negative channel is the "no camera coloured this" sentinel, which is
+        // deliberately not black — a dark buoy would be black.
+        const r = rgb?.[index * 3] ?? -1;
+        const next =
+          r < 0 ? fallback : `rgba(${r}, ${rgb[index * 3 + 1]}, ${rgb[index * 3 + 2]}, 0.85)`;
+        // Assigning fillStyle is the expensive part of this loop, so only do it
+        // when the colour actually changes — an uncoloured sweep sets it once.
+        if (next !== fill) {
+          fill = next;
+          ctx.fillStyle = next;
+        }
+        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+      });
     }
   }
 
