@@ -88,6 +88,17 @@
                   <button class="icon-btn" id="fit-view" type="button" title="Fit everything (R)" aria-label="Fit view">⤢</button>
                 </div>
                 <button class="chip chip--toggle is-on" id="follow-toggle" type="button" aria-pressed="true" title="Keep the vessel centred (F)">Follow</button>
+                <!-- Clearing the world model belongs on the map, not buried in
+                     the autonomy panel's small print: the thing you are reacting
+                     to is drawn here, and between two tasks this is what you
+                     press. Admin only, and it confirms — the vessel now keeps a
+                     survey across restarts, so this throws away more than the
+                     live tracks. To remove one bad mark instead, right-click it
+                     (or press and hold on a touchscreen). -->
+                <button class="chip chip--danger" id="forget-world" type="button" hidden
+                        title="Drop every mark the boat is tracking, and the survey it saved. Between tasks — not between two attempts at the same one.">
+                  Clear what it has seen
+                </button>
               </div>
             </header>
 

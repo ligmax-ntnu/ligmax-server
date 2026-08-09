@@ -17,6 +17,11 @@ Transports
     browser -> server GET  /api/camera/0.jpg            (read gate)
                       POST /api/camera/config           (admin cookie required)
 
+    boat  -> server   POST /api/trip/<name>             (boat key; gzip body)
+                      GET  /api/trip                    (boat key or read gate)
+    browser -> server GET  /api/trip/<boat>/<name>      (read gate; downloads)
+                      DELETE /api/trip/<boat>/<name>    (admin cookie required)
+
 Every one of those boat-side links is *outbound from the vessel*, including the
 video: on 4G there is no route in. See `camera.py`.
 """
@@ -44,7 +49,7 @@ from flask import (
     url_for,
 )
 
-from . import auth, lights_effects, plan as planning, protocol, tuning
+from . import auth, lights_effects, plan as planning, protocol, trips, tuning
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
@@ -199,9 +204,30 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # the same tools/review_trip.py as an autonomous one.
     "record_start": {"label": "Start recording", "args": {}},
     "record_stop": {"label": "Stop recording", "args": {}},
-    # Between tasks: the world model keeps marks for a few seconds after they go
-    # out of view, and the last task's buoys are not this task's.
+    # Between TASKS, not between attempts at the same one. The vessel now keeps
+    # the marks it has properly surveyed and reloads them after a restart, so
+    # this clears the stored survey as well as the live tracks - which is what an
+    # operator pressing "clear everything" means, and what stops it all
+    # reappearing a minute later. Attempt two of the same task wants the opposite:
+    # see forget_object for removing one bad mark without losing the survey.
     "forget_world": {"label": "Clear what it has seen", "args": {}},
+    # One object, by the `track_id` drawn on the chart. `float` is how
+    # `autopilot_goto` declares its index, so this needs no new validation
+    # machinery; the vessel accepts `id` or `track_id` and suppresses that spot
+    # for 30 s so a phantom does not come straight back.
+    "forget_object": {"label": "Delete this object", "args": {"id": "float"}},
+    # Careful mode: a 1 knot ceiling the operator can drop to and release while
+    # the boat is running, for a first pass down an unfamiliar course. It takes
+    # effect on the next tick and does not interrupt the run, which is why these
+    # are two plain commands rather than anything that stops and restarts.
+    #
+    # They are a pair rather than one toggle with an argument because the state
+    # already rides up in the telemetry (`autopilot.commander.careful`), so the
+    # dashboard renders a toggle from what the boat says is true rather than from
+    # what it last sent - the two disagree exactly when it matters, after a
+    # dropped command.
+    "careful_on": {"label": "Careful mode (1 kn)", "args": {}, "log_level": "WARN"},
+    "careful_off": {"label": "Normal speed", "args": {}, "log_level": "WARN"},
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
 }
 
@@ -292,6 +318,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     app.config["LIGMAX_DEPLOY"] = deployments
     cameras = CameraRelay()
     app.config["LIGMAX_CAMERA"] = cameras
+    recordings = trips.TripStore(config.trip_store)
+    app.config["LIGMAX_TRIPS"] = recordings
+    if recordings.last_error:
+        config.warnings.append(f"trip recordings unavailable: {recordings.last_error}")
     profiles = tuning.ProfileStore(config.tuning_store)
     app.config["LIGMAX_TUNING"] = profiles
     if profiles.last_error:
@@ -567,6 +597,95 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["X-Frame-Age"] = f"{frame.age():.2f}"
         response.headers["X-Frame-Seq"] = str(frame.seq)
         return response
+
+    # -- trip recordings ----------------------------------------------------
+    #
+    # The vessel's own account of a run, pushed up after it. See `trips.py` for
+    # the resume rule and why this is not part of /api/ingest.
+    #
+    # Reading is behind the read gate rather than the admin gate, deliberately:
+    # a recording is evidence, the same as the telemetry it was made from, and
+    # the people who most want it in the tent are the ones without the key.
+    # Deleting is not, because it is the only irreversible thing here.
+
+    @app.post("/api/trip/<name>")
+    def trip_upload(name: str) -> Response:
+        if not boat_authorised():
+            store.note_rejected()
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+
+        boat = request.args.get("boat") or trips.DEFAULT_BOAT
+        body = request.get_data(cache=False)
+        try:
+            result = recordings.accept(
+                boat, name, body, request.headers.get("Content-Range")
+            )
+        except trips.TripError as exc:
+            # `bytes_held` rides on the refusal as well as the success, so a
+            # sender that has lost its place recovers from the 409 itself rather
+            # than needing a second request to ask. It is carried on the error
+            # rather than looked up again here, because "how much do we hold"
+            # was already answered under the lock and re-reading it outside one
+            # could hand back a different number than the refusal was based on.
+            payload: dict[str, Any] = {"error": exc.message}
+            if exc.held is not None:
+                payload["bytes_held"] = exc.held
+            if exc.status >= 500:
+                store.add_log("ERROR", f"trip {name}: {exc.message}", "gui.trip")
+            return jsonify(payload), exc.status  # type: ignore[return-value]
+
+        if result.get("complete") and result.get("stored"):
+            store.add_log(
+                "INFO",
+                f"trip recording {boat}/{name} received "
+                f"({result['bytes_held'] / 1048576.0:.1f} MB)",
+                "gui.trip",
+            )
+        return jsonify(result)
+
+    @app.get("/api/trip")
+    def trip_list() -> Response:
+        """What is already held, so the vessel can skip it and a browser can list it.
+
+        The boat key is accepted as well as the read gate: this is the vessel's
+        first call after a reconnect, and it has a boat key rather than a cookie.
+        """
+        if not (may_read() or boat_authorised()):
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify(
+            {**recordings.summary(request.args.get("boat")), "admin": is_admin()}
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/trip/<boat>/<name>")
+    def trip_download(boat: str, name: str) -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        try:
+            path = recordings.path_for(boat, name)
+        except trips.TripError as exc:
+            return jsonify({"error": exc.message}), exc.status  # type: ignore[return-value]
+        response = make_response(
+            send_from_directory(
+                path.parent, path.name, as_attachment=True, mimetype="application/gzip"
+            )
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.delete("/api/trip/<boat>/<name>")
+    def trip_delete(boat: str, name: str) -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        try:
+            recordings.delete(boat, name)
+        except trips.TripError as exc:
+            return jsonify({"error": exc.message}), exc.status  # type: ignore[return-value]
+        store.add_log(
+            "WARN", f"trip recording {boat}/{name} deleted [{_client_ip()}]", "gui.trip"
+        )
+        return jsonify({"ok": True, **recordings.summary()})
 
     # -- telemetry out to browsers ------------------------------------------
 
@@ -873,6 +992,18 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                     {"error": "'index' must be a waypoint number, counting from 0"}
                 ), 400
             cleaned["index"] = int(index)
+
+        if name == "forget_object":
+            # Sent as a number because that is what the args table can express,
+            # but it is the integer `track_id` the chart drew and the vessel
+            # matches on. Narrowed here so a stray 7.5 cannot reach the boat and
+            # come back "no object 7.5" a second later.
+            track = cleaned.get("id")
+            if track is None or not math.isfinite(track) or track < 0:
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'id' must be the track id shown on the chart"}
+                ), 400
+            cleaned["id"] = int(track)
 
         if name == "set_lights_pattern":
             # lights_effects.validate_frames() mirrors
@@ -1271,6 +1402,24 @@ def serve_udp(
     sock.close()
 
 
-def serve_housekeeping(store: Store, stop: threading.Event) -> None:
+def serve_housekeeping(
+    store: Store, stop: threading.Event, recordings: trips.TripStore | None = None
+) -> None:
+    """Expire stale commands, and sweep up abandoned partial uploads.
+
+    `recordings` is optional so a test can run the loop alone. The sweep is on a
+    long counter rather than every tick: an abandoned `.part` blocks its own name
+    until it is removed, but nothing about that is urgent, and walking the trip
+    directory twice a second would be silly.
+    """
+    ticks = 0
     while not stop.wait(2.0):
         store.expire_commands()
+        ticks += 1
+        if recordings is not None and ticks % 300 == 0:  # ~every 10 minutes
+            if removed := recordings.sweep():
+                store.add_log(
+                    "INFO",
+                    f"dropped {removed} abandoned trip upload(s)",
+                    "gui.trip",
+                )

@@ -194,7 +194,19 @@ function renderTooltip(store, hover) {
   rows.push(['Confidence', `${(100 * (track.confidence ?? 0)).toFixed(0)} %`]);
   if (Number.isFinite(track.width_m)) rows.push(['Width', `${track.width_m.toFixed(2)} m`]);
   if (Number.isFinite(track.speed)) rows.push(['Speed', `${track.speed.toFixed(2)} m/s`]);
-  rows.push(['Avoid radius', `${(track.avoid_radius ?? 0).toFixed(1)} m`]);
+
+  // `avoid_radius` is clearance PLUS the position uncertainty, and `radius` is
+  // that uncertainty on its own. Splitting them matters the first time a
+  // remembered mark claims about 8 m of water: that is 2 m of clearance around a
+  // mark whose position is only known to 6 m, which is correct and looks alarming
+  // until the two numbers are shown side by side.
+  const uncertainty = track.radius;
+  rows.push([
+    'Avoid radius',
+    Number.isFinite(uncertainty) && uncertainty > 0.01
+      ? `${(track.avoid_radius ?? 0).toFixed(1)} m — clearance + ${uncertainty.toFixed(1)} m uncertainty`
+      : `${(track.avoid_radius ?? 0).toFixed(1)} m`,
+  ]);
 
   if (boat) {
     const dx = track.position[0] - boat[0];
@@ -216,7 +228,16 @@ function renderTooltip(store, hover) {
     ]);
   }
   if (track.source) rows.push(['Source', track.source]);
-  if (Number.isFinite(track.age)) rows.push(['Age', `${track.age.toFixed(1)} s`]);
+  // Age is seconds since this object was last really measured, so a track with a
+  // large one is being remembered rather than seen. `misses` is how many ageing
+  // steps went by with no measurement, which is the difference between "occluded
+  // for a moment" and "never really there".
+  if (Number.isFinite(track.age)) {
+    const misses = Number.isFinite(track.misses) && track.misses > 0
+      ? `, ${track.misses} missed sweep${track.misses === 1 ? '' : 's'}`
+      : '';
+    rows.push(['Last seen', `${track.age.toFixed(1)} s ago${misses}`]);
+  }
   // How many camera votes a cardinal has, and whether they have settled. The
   // boat falls back to the planned side until they do, so "not committed" is
   // the difference between the rule steering the boat and the plan doing it.
@@ -250,6 +271,15 @@ function renderTooltip(store, hover) {
     why.className = 'map-tooltip-why';
     why.textContent = track.why;
     nodes.push(why);
+  }
+  // Only shown to someone who can actually do it, and only as a hint — the
+  // gesture is deliberately not a plain click, so it has to be discoverable
+  // somewhere, and the thing itself is the obvious place to say so.
+  if (store.session.admin) {
+    const hint = document.createElement('p');
+    hint.className = 'map-tooltip-hint';
+    hint.textContent = 'Right-click or press and hold to forget this object';
+    nodes.push(hint);
   }
 
   tooltip.replaceChildren(...nodes);
@@ -437,6 +467,58 @@ async function boot() {
     canSend: admin,
     compact: true,
   });
+
+  /* --- editing the world model on the chart -------------------------- */
+  //
+  // Both of these go through the autopilot panel's `send`, so they queue, expire
+  // and are audited exactly like every other operator command — there is no
+  // second path to the vessel just because these buttons happen to be on a map.
+
+  if (admin) {
+    const forgetWorld = $('forget-world');
+    forgetWorld.hidden = false;
+    forgetWorld.addEventListener('click', () => {
+      const survey = store.telemetry('autopilot.survey.marks');
+      const kept = Number.isFinite(survey) && survey > 0
+        ? `\n\nThis also deletes the ${survey} surveyed mark(s) saved to disk, so ` +
+          'attempt 2 would start blind. If you only want one bad mark gone, ' +
+          'right-click it on the chart instead.'
+        : '';
+      if (
+        !window.confirm(
+          'Clear the world model?\n\nEvery mark the boat is currently tracking ' +
+            'is dropped. This is what you do between tasks, not between two ' +
+            `attempts at the same one.${kept}`
+        )
+      ) {
+        return;
+      }
+      autopilotPanel.send('forget_world');
+    });
+
+    // Right-click, or press and hold, a mark to delete just that one. No undo
+    // is offered and none is needed: if the object is real the lidar puts it
+    // back within a sweep or two, and the vessel refuses that spot for 30 s so
+    // a phantom does not reappear the instant it is dismissed.
+    map.onTrackDelete = async (track) => {
+      const style = styleOf(track);
+      const name = track.label ?? style.label;
+      const [x, y] = track.position;
+      if (
+        !window.confirm(
+          `Delete #${track.track_id} — ${name} at ${x.toFixed(1)}, ${y.toFixed(1)} m?\n\n` +
+            'The boat forgets it, removes it from the saved survey, and refuses ' +
+            'that spot for 30 seconds. If it is really there, the lidar will put ' +
+            'it back.'
+        )
+      ) {
+        return;
+      }
+      if (await autopilotPanel.send('forget_object', { id: track.track_id })) {
+        notify(`Asked the boat to forget #${track.track_id} (${name}).`, 'ok', 6000);
+      }
+    };
+  }
 
   /* --- store -> ui -------------------------------------------------- */
 

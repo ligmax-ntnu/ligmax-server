@@ -305,6 +305,7 @@ export class WorldMap {
       canvas.setPointerCapture(event.pointerId);
       this._pan = { x: event.clientX, y: event.clientY };
       canvas.classList.add('is-panning');
+      this._armLongPress(event);
     });
 
     canvas.addEventListener('pointermove', (event) => {
@@ -314,6 +315,8 @@ export class WorldMap {
       if (this._pan) {
         const dx = event.clientX - this._pan.x;
         const dy = event.clientY - this._pan.y;
+        // Any real movement is a pan, not a press-and-hold.
+        if (Math.hypot(dx, dy) > 1.5) this._cancelLongPress();
         this._pan = { x: event.clientX, y: event.clientY };
         this.camera.cx -= dx / this.camera.ppm;
         this.camera.cy += dy / this.camera.ppm;
@@ -328,6 +331,7 @@ export class WorldMap {
     });
 
     const endPan = (event) => {
+      this._cancelLongPress();
       if (!this._pan) return;
       this._pan = null;
       canvas.classList.remove('is-panning');
@@ -336,7 +340,21 @@ export class WorldMap {
     canvas.addEventListener('pointerup', endPan);
     canvas.addEventListener('pointercancel', endPan);
 
+    // Right-click a track to delete it. Deliberately not a plain left click:
+    // the chart is panned by dragging and tapped to lay waypoints, and a
+    // mis-click that removes a real mark from the world model is not something
+    // to make one pixel of travel away from panning the map.
+    canvas.addEventListener('contextmenu', (event) => {
+      const [px, py] = this._pointerScreen(event);
+      const hit = this._trackAt(px, py, 20);
+      if (!hit) return; // no track under the cursor: leave the browser menu alone
+      event.preventDefault();
+      this._cancelLongPress();
+      this.onTrackDelete?.(hit.track);
+    });
+
     canvas.addEventListener('pointerleave', () => {
+      this._cancelLongPress();
       this.pointer = null;
       this.hovered = null;
       this.onHover?.(null);
@@ -387,12 +405,47 @@ export class WorldMap {
     return this.screenToWorld(event.clientX - rect.left, event.clientY - rect.top);
   }
 
-  _updateHover() {
-    if (!this.pointer) return;
-    const [px, py] = this.pointer;
-    let best = null;
-    let bestDistance = 16;
+  /**
+   * Press-and-hold on a track is the touch equivalent of a right-click.
+   *
+   * `contextmenu` covers the desktop but is not dependable under a finger —
+   * iOS Safari in particular does not raise it — and the phone on the dock is
+   * the case this whole panel is designed around. So the gesture is measured
+   * here instead of being delegated to the browser, and it is cancelled by any
+   * movement, so a pan that happens to start on a buoy stays a pan.
+   */
+  _armLongPress(event) {
+    this._cancelLongPress();
+    if (event.pointerType === 'mouse') return; // the mouse has a real right button
+    const [px, py] = this._pointerScreen(event);
+    if (!this._trackAt(px, py, 20)) return;
+    this._longPress = window.setTimeout(() => {
+      this._longPress = null;
+      const hit = this._trackAt(px, py, 20);
+      // Re-tested at fire time: half a second is long enough for the track to
+      // have moved or been dropped, and deleting whatever has since drifted
+      // under the finger would be worse than doing nothing.
+      if (hit) this.onTrackDelete?.(hit.track);
+    }, 550);
+  }
 
+  _cancelLongPress() {
+    if (this._longPress) {
+      window.clearTimeout(this._longPress);
+      this._longPress = null;
+    }
+  }
+
+  /**
+   * The track nearest a screen point, within `radius` px, or null.
+   *
+   * Shared by hover and by the delete gesture so the two can never disagree
+   * about what is under the finger — "it highlighted one buoy and deleted a
+   * different one" is not a bug worth ever making possible.
+   */
+  _trackAt(px, py, radius = 16) {
+    let best = null;
+    let bestDistance = radius;
     for (const track of this.store.state.tracks ?? []) {
       const [sx, sy] = this.worldToScreen(track.position[0], track.position[1]);
       const distance = Math.hypot(sx - px, sy - py);
@@ -401,10 +454,21 @@ export class WorldMap {
         best = { track, screen: [sx, sy] };
       }
     }
+    return best;
+  }
 
+  _updateHover() {
+    if (!this.pointer) return;
+    const best = this._trackAt(this.pointer[0], this.pointer[1]);
     const changed = best?.track?.track_id !== this.hovered?.track?.track_id;
     this.hovered = best;
     if (changed) this.onHover?.(best);
+  }
+
+  /** Screen coordinates of a pointer event, relative to the canvas. */
+  _pointerScreen(event) {
+    const rect = this.canvas.getBoundingClientRect();
+    return [event.clientX - rect.left, event.clientY - rect.top];
   }
 
   _resize() {

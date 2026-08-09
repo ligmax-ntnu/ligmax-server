@@ -158,6 +158,37 @@
             </p>
           </section>
 
+          <!-- --------------------------------------------- trip recordings -->
+          <!-- The vessel's own account of each run, pushed up off the boat after
+               it. This is what §6's "read the waypoint table before attempt two"
+               is actually done from, and the reason the route exists at all is
+               that the run most worth reviewing is usually the one where the
+               boat had to be carried back — so the file must not still be on it.
+
+               Not admin-gated for reading. A recording is evidence, the same as
+               the telemetry it was made from, and the people who want it in the
+               tent are the ones without the key. Deleting is gated. -->
+          <section class="card card--trips" id="trips-card">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">After the run</span>
+                <h2 class="card-title">Trip recordings</h2>
+              </div>
+              <div class="course-tools">
+                <button class="chip" id="trips-reload" type="button"
+                        title="Re-read what the ground station is holding">Refresh</button>
+              </div>
+            </header>
+            <div class="trip-list" id="trips-list"></div>
+            <p class="card-note card-note--tight" id="trips-status">Loading…</p>
+            <p class="card-note card-note--tight">
+              Read one back with <code>python3 tools/review_trip.py &lt;file&gt;</code>, or
+              <code>--html out.html</code> for something to point at. Tracks marked
+              <code>E</code> were established and are in the survey; <code>R</code> means
+              they were restored from a previous attempt.
+            </p>
+          </section>
+
           <!-- ------------------------------------------------ the course -->
           <!-- Built for one moment: 08:15 on a competition morning, on a phone,
                on a dock. The coordinates are handed out at 08:00 and the first

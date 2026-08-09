@@ -155,6 +155,32 @@ export class AutopilotPanel {
 
     root.append(headline, this._reason, this._blocked);
 
+    // -- the speed ceiling ------------------------------------------------
+    //
+    // Second most-misdiagnosed thing on this boat under time pressure, after
+    // "why will it not engage": a boat that is inexplicably slow. Careful mode
+    // is a 1 kn ceiling somebody set two minutes ago and forgot, and without
+    // this line the only symptom is a boat that crawls. So the ceiling in force
+    // is stated whenever it is not the ordinary one, next to the toggle that
+    // caused it.
+    this._speed = el('div', 'ap-speed');
+    this._speedText = el('span', 'ap-speed-text');
+    this._careful = el('button', 'chip chip--toggle', 'Careful mode (1 kn)');
+    this._careful.type = 'button';
+    this._careful.disabled = !this.canSend;
+    this._careful.title =
+      'Hold the boat to 1 knot so a first pass down an unfamiliar course can be ' +
+      'walked alongside. Takes effect on the next tick and does not interrupt the ' +
+      'run; releasing it does not either.';
+    this._careful.addEventListener('click', () => {
+      // Driven off what the boat reports, not off a local flag: after a dropped
+      // command the two disagree, and that is exactly when this gets pressed.
+      const on = Boolean(this.block?.commander?.careful);
+      this.send(on ? 'careful_off' : 'careful_on');
+    });
+    this._speed.append(this._speedText, this._careful);
+    root.append(this._speed);
+
     // -- progress ---------------------------------------------------------
     this._progress = el('div', 'ap-progress');
     this._progressBar = el('div', 'ap-bar');
@@ -256,9 +282,12 @@ export class AutopilotPanel {
       this._progressText.textContent = 'No course loaded.';
       this._progressFill.style.width = '0%';
       this._sees.textContent = '';
+      // Nothing is reporting a ceiling, so claiming one would be inventing it.
+      this._speed.hidden = true;
       if (this._detail) this._detail.replaceChildren();
       return;
     }
+    this._speed.hidden = false;
 
     const mode = String(block.mode ?? 'IDLE').toUpperCase();
     const blocked = block.blocked ?? null;
@@ -278,9 +307,41 @@ export class AutopilotPanel {
     }
 
     this._updateProgress(block);
+    this._updateSpeed(block);
     this._updateSees(block);
     this._updateActions(mode);
     if (this._detail) this._updateDetail(block);
+  }
+
+  /**
+   * The ceiling in force, and the toggle that sets it.
+   *
+   * `speed_ceiling_kn` is what is actually being enforced; `speed_limit_kn` is
+   * the 5 kn vessel limit that no mode can raise. Both are worth showing, but
+   * only the first is worth shouting about, and only when it is not the usual
+   * one — a permanent "3.1 kn ceiling" banner would be noise that hides the
+   * 1 kn one on the day it matters.
+   */
+  _updateSpeed(block) {
+    const commander = block.commander ?? {};
+    const careful = Boolean(commander.careful);
+    const ceiling = commander.speed_ceiling_kn;
+    const limit = commander.speed_limit_kn;
+
+    this._careful.classList.toggle('is-on', careful);
+    this._careful.setAttribute('aria-pressed', String(careful));
+    this._careful.textContent = careful ? 'Careful mode ON — 1 kn' : 'Careful mode (1 kn)';
+
+    this._speed.dataset.careful = String(careful);
+    if (careful) {
+      this._speedText.textContent = Number.isFinite(ceiling)
+        ? `Held to ${ceiling.toFixed(1)} kn`
+        : 'Held to 1 kn';
+    } else if (Number.isFinite(limit)) {
+      this._speedText.textContent = `Limit ${limit.toFixed(1)} kn`;
+    } else {
+      this._speedText.textContent = '';
+    }
   }
 
   _updateProgress(block) {
@@ -350,6 +411,16 @@ export class AutopilotPanel {
         `${perception.front_clusters ?? 0} front + ${perception.aft_clusters ?? 0} aft clusters`
       );
     }
+    // What the boat is remembering rather than seeing. Between the two attempts
+    // at one task this is the single most useful sentence on the screen — "it is
+    // starting with 7 marks it already knows" — and it is the only way to see
+    // that the survey actually loaded rather than silently failing to.
+    if (perception.restored > 0) {
+      parts.push(`${perception.restored} restored from the last attempt`);
+    }
+    if (perception.remembered > 0) {
+      parts.push(`${perception.remembered} remembered, not in view`);
+    }
     if (perception.edge && perception.edge !== 'connected') parts.push(perception.edge);
     this._sees.textContent = parts.length ? `Sees: ${parts.join(' · ')}` : '';
   }
@@ -379,10 +450,20 @@ export class AutopilotPanel {
     }
 
     const recording = block.recording ?? {};
-    rows.push([
-      'Recording',
-      recording.recording ? recording.file ?? 'yes' : 'not recording — attempt 2 will be blind',
-    ]);
+    const recordingParts = [];
+    if (recording.recording) {
+      recordingParts.push(recording.file ?? 'yes');
+      if (Number.isFinite(recording.mb)) recordingParts.push(`${recording.mb.toFixed(1)} MB`);
+    } else {
+      recordingParts.push('not recording — attempt 2 will be blind');
+    }
+    // "The card filled up" is something the crew can act on from the dock and
+    // cannot otherwise see. `truncated` means it already has.
+    if (recording.truncated) recordingParts.push('TRUNCATED — the card ran out');
+    if (Number.isFinite(recording.free_mb)) {
+      recordingParts.push(`${recording.free_mb.toFixed(0)} MB free`);
+    }
+    rows.push(['Recording', recordingParts.join(' · ')]);
 
     const perception = block.perception ?? {};
     if (Number.isFinite(perception.confirmed)) {
@@ -391,10 +472,42 @@ export class AutopilotPanel {
         `${perception.confirmed} confirmed of ${perception.tracks ?? '?'} tracked`,
       ]);
     }
+    // Established marks are the ones promoted to permanent memory — 12 sightings
+    // spread over 2 s — and they are what the survey is written from. Worth its
+    // own row because "tracked" and "will survive a restart" are very different
+    // claims about the same chart.
+    if (Number.isFinite(perception.established)) {
+      const memory = [`${perception.established} established`];
+      if (perception.remembered > 0) memory.push(`${perception.remembered} out of view`);
+      if (perception.restored > 0) memory.push(`${perception.restored} restored`);
+      rows.push(['Memory', memory.join(', ')]);
+    }
+
+    // The survey on disk, which is what makes attempt two start with attempt
+    // one's map. `marks: 0` after a run is the failure worth catching early.
+    const survey = block.survey ?? {};
+    if (survey.enabled !== undefined) {
+      if (!survey.enabled) {
+        rows.push(['Survey', 'disabled — attempt 2 starts blind']);
+      } else {
+        const saved = [`${survey.marks ?? 0} mark(s) saved`];
+        if (Number.isFinite(survey.age_s)) saved.push(`${survey.age_s.toFixed(0)} s ago`);
+        if (survey.last_error) saved.push(survey.last_error);
+        rows.push(['Survey', saved.join(' · ')]);
+      }
+    }
+
     if (perception.edge) rows.push(['Jetson', perception.edge]);
 
     const bus = block.bus ?? {};
     if (Number.isFinite(bus.hz)) rows.push(['Node bus', `${bus.hz.toFixed(1)} Hz`]);
+
+    // The io_manager end of the node bus, published by io_manager rather than by
+    // the autonomy node, so it survives the node it describes. "The autonomy node
+    // is not running" and "the bus between them is broken" look identical without
+    // it, and they have different fixes.
+    const bridge = this.store.telemetry('autopilot_bridge.state');
+    if (bridge) rows.push(['Bridge', String(bridge)]);
 
     const signature = rows.map((row) => row.join('=')).join('|');
     if (this._detail.dataset.signature === signature) return;

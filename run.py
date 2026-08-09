@@ -54,7 +54,10 @@ def main() -> int:
             name="udp-ingest",
         ).start()
     threading.Thread(
-        target=serve_housekeeping, args=(store, stop), daemon=True, name="housekeeping"
+        target=serve_housekeeping,
+        args=(store, stop, app.config.get("LIGMAX_TRIPS")),
+        daemon=True,
+        name="housekeeping",
     ).start()
     # The RTK caster: the base station and the vessel are both on 4G, so this box
     # is the only place they can meet. Its own thread, and a bind failure only

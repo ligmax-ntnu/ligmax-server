@@ -29,6 +29,7 @@ import {
   updateHeader,
 } from './shell.js';
 import { KpiStrip, TelemetryPanels } from './telemetry.js';
+import { TripPanel } from './trips.js';
 import { TuningPanel } from './tuning.js';
 
 async function boot() {
@@ -135,6 +136,20 @@ async function boot() {
   tuningReload.addEventListener('click', () => tuningPanel.reload());
   tuningPanel.start();
 
+  /* --- trip recordings ---------------------------------------------- */
+
+  // Everyone can list and download; only an admin sees a delete button. See
+  // trips.js — a recording is evidence, and the tent is full of people who need
+  // to read one and do not have the key.
+  const tripPanel = new TripPanel(
+    {
+      list: $('trips-list'),
+      status: $('trips-status'),
+      reload: $('trips-reload'),
+    },
+    { notify, admin }
+  ).start();
+
   /* --- deployments -------------------------------------------------- */
 
   let deployPanel = null;
@@ -183,6 +198,7 @@ async function boot() {
     kpiStrip,
     telemetryPanels,
     deployPanel,
+    tripPanel,
     tuningPanel,
     autopilotPanel,
     coursePlanner,

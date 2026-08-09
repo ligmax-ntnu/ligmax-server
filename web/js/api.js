@@ -109,6 +109,31 @@ export async function deleteTuningProfile(name) {
   });
 }
 
+/* --- trip recordings --------------------------------------------------- */
+
+export async function fetchTrips() {
+  const response = await fetch('/api/trip', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`trip list failed: ${response.status}`);
+  return response.json();
+}
+
+export async function deleteTrip(boat, name) {
+  const response = await fetch(
+    `/api/trip/${encodeURIComponent(boat)}/${encodeURIComponent(name)}`,
+    { method: 'DELETE', credentials: 'same-origin' }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `delete failed (${response.status})`);
+  }
+  return payload;
+}
+
+/** The download URL for one recording. A plain link, so the browser streams it. */
+export function tripUrl(boat, name) {
+  return `/api/trip/${encodeURIComponent(boat)}/${encodeURIComponent(name)}`;
+}
+
 /**
  * Open the telemetry stream. Returns a handle with `.close()`.
  * `handlers` keys map to SSE event names, plus `onOpen` / `onError`.

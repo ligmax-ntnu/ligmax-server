@@ -547,6 +547,20 @@
   justify-content: center;
 }
 
+/* Destructive, but not an emergency. Outlined rather than filled: it sits in the
+   map's toolbar next to Follow and the zoom controls, and a solid red button up
+   there would read as the E-stop from across the tent. */
+.chip--danger {
+  border-color: color-mix(in srgb, var(--danger, #e2453f) 45%, var(--line));
+  color: var(--danger, #e2453f);
+}
+
+.chip--danger:hover {
+  border-color: var(--danger, #e2453f);
+  background: color-mix(in srgb, var(--danger, #e2453f) 12%, transparent);
+  color: var(--danger, #e2453f);
+}
+
 .mission-lay {
   display: flex;
   flex-direction: column;
@@ -1088,6 +1102,53 @@
 }
 
 /* --- deploy panel ---------------------------------------------------- */
+
+/* Trip recordings (trips.js). One row per file: name, size, age, and a delete
+   for admins. Sized to be tappable, because this list is read on a phone in a
+   tent between two attempts rather than at a desk. */
+.trip-list {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0 1rem 0.25rem;
+}
+
+.trip-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 0.3rem 0.7rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.8rem;
+}
+
+.trip-name {
+  font-family: ui-monospace, monospace;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+  color: var(--brand-600);
+  text-decoration: none;
+}
+
+.trip-name:hover { text-decoration: underline; }
+
+.trip-size,
+.trip-age,
+.trip-note {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* An upload still arriving. Dimmed and non-interactive: there is no link on it
+   on purpose, because half a gzip is not a file anyone should be handed. */
+.trip-row--pending {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.trip-row--pending .trip-name { color: var(--muted); }
 
 .deploy-list {
   display: grid;
@@ -2015,6 +2076,34 @@
 
 .ap-sees:empty { display: none; }
 
+/* The speed ceiling and its toggle. Quiet at the ordinary limit and loud in
+   careful mode, because "the boat is inexplicably slow" is a misdiagnosis this
+   line exists to prevent — it has to be the thing you notice, not a field you
+   have to go looking for. */
+.ap-speed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ap-speed-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ap-speed[data-careful='true'] .ap-speed-text {
+  color: var(--warn, #efc63d);
+  font-weight: 700;
+}
+
+.ap-speed .chip.is-on {
+  border-color: var(--warn, #efc63d);
+  color: var(--warn, #efc63d);
+}
+
 .ap-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
@@ -2149,6 +2238,16 @@
   font-size: 0.78rem;
   line-height: 1.35;
   font-style: italic;
+}
+
+/* How to delete this mark. Quiet on purpose — it is a note about the interface,
+   not a fact about the object, and it must not compete with the sentence above
+   it, which is the part the jury reads. */
+.map-tooltip-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  opacity: 0.8;
 }
 
 /* Placement on the control page. The autopilot panel sits in the command column,

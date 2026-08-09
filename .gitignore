@@ -26,3 +26,9 @@ tuning-profiles.json.tmp
 # than widening it to light-effects*.json, which would drop them.
 light-effects.json
 light-effects.json.tmp
+
+# Trip recordings pushed up off the vessel (ligmax_gui/trips.py). Tens of
+# megabytes per attempt, and they are measurements of one particular run rather
+# than anything a checkout should carry. `.part` files are uploads still in
+# flight; both are ignored so a git status during a competition is readable.
+trips/
