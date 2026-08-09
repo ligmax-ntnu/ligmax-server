@@ -376,13 +376,36 @@ class TripStore:
         }
 
     def delete(self, boat: str, name: str) -> None:
+        """Remove a recording, and any half-finished upload of the same name.
+
+        The unlink is guarded because **this server runs on Windows**, where a
+        file being read cannot be unlinked at all. Werkzeug serves a download
+        straight off an open handle, so an admin pressing delete while someone
+        in the tent is still pulling the same 60 MB file gets `WinError 32` out
+        of `os.unlink`. On Linux the unlink would simply succeed and the reader
+        would keep its handle to a file that no longer has a name, which is why
+        this is not a case the code would ever have hit in development.
+
+        Unguarded, that `OSError` was not a `TripError`, so it went past the
+        handler in `server.trip_delete` and Flask answered with a 500 and a
+        traceback - "the ground station is broken" rather than "wait for the
+        download to finish". 409 and a sentence saying which.
+        """
         boat, name = self._safe(boat, name)
         final, part = self._paths(boat, name)
         with self._lock:
             if not final.is_file() and not part.is_file():
                 raise TripError(f"no recording called {name!r}", status=404)
-            final.unlink(missing_ok=True)
-            part.unlink(missing_ok=True)
+            for path in (final, part):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise TripError(
+                        f"could not delete {name!r}: {exc.strerror or exc}. On "
+                        "Windows a recording cannot be removed while it is being "
+                        "downloaded - let the transfer finish and try again",
+                        status=409,
+                    ) from exc
 
     def sweep(self, now: float | None = None) -> int:
         """Drop `.part` files nothing has touched in a long time. Never raises.

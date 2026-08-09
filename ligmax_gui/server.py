@@ -132,6 +132,34 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "confirm": True,
         "log_level": "WARN",
     },
+    # Walk the amas up or down, as an RC override on channel 14
+    # (ligmax-pi/nodes/io_manager/pixhalwk.py). The translator ESP32 reads the
+    # pulse as a VELOCITY, so this is not "go to a height" - 1500 is stop and
+    # anything else keeps both amas moving for as long as the vessel keeps
+    # sending it. That is why it confirms and why it is logged at WARN: it is
+    # the one command here that leaves the boat still moving after it is acked.
+    #
+    # Two commands rather than one with a `release` flag, for two reasons. The
+    # mechanical one: every arg declared below is REQUIRED (see the validator),
+    # so a single spec of {"pwm", "release"} could not express either of the two
+    # things it meant - both forms 400. The real one: releasing is not a stop.
+    # 1500 holds the channel at the translator's own STOP; releasing hands it
+    # back to the receiver, and if the transmitter has it parked off centre,
+    # letting go is what STARTS the creep. Two irreversible-ish actions that
+    # differ that sharply get two buttons and two audit entries, the same split
+    # `careful_on`/`careful_off` and `set_mission`/`arm` already use.
+    "set_ride_height": {
+        "label": "Move amas (hold to travel)",
+        "args": {"pwm": "float"},
+        "confirm": True,
+        "log_level": "WARN",
+    },
+    "release_ride_height": {
+        "label": "Release amas channel to the receiver",
+        "args": {},
+        "confirm": True,
+        "log_level": "WARN",
+    },
     # Re-read the whole tuning table off the autopilot. The vessel does this on
     # every connect and once a minute anyway; this is the button for after someone
     # has been editing parameters in Mission Planner.

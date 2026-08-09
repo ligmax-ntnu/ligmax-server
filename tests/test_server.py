@@ -115,6 +115,23 @@ def test_command_specs():
     r = client.post("/api/command", json={"name": "forget_object", "args": {"id": 12.0}})
     check(r.status_code == 200, "a whole-number float is fine - JSON has no ints")
 
+    # Ride height, and the property worth pinning: EVERY declared arg is
+    # required, there is no optional-arg mechanism in this validator. A spec of
+    # {"pwm", "release"} therefore cannot express "move" or "let go" - both
+    # forms 400 - which is why releasing is its own command. Sending each in its
+    # natural shape is the whole test.
+    r = client.post("/api/command", json={"name": "set_ride_height", "args": {"pwm": 1600}})
+    check(r.status_code == 200, f"set_ride_height takes a pwm on its own ({r.status_code})")
+    r = client.post("/api/command", json={"name": "release_ride_height", "args": {}})
+    check(r.status_code == 200, f"release_ride_height needs no args ({r.status_code})")
+    check(
+        "release" not in COMMAND_SPECS["set_ride_height"]["args"],
+        "releasing is its own command, not a flag on this one - as a flag it "
+        "and 'pwm' would both be required, and neither form could be sent",
+    )
+    r = client.post("/api/command", json={"name": "set_ride_height", "args": {}})
+    check(r.status_code == 400, "set_ride_height without a pwm is refused")
+
     # Still an allow-list. This is the property that makes a stray fetch() from a
     # browser console unable to invent vessel behaviour.
     r = client.post("/api/command", json={"name": "careful_maybe", "args": {}})
@@ -295,6 +312,14 @@ def test_trip_limits_and_gates():
         "attachment" in r.headers.get("Content-Disposition", ""),
         "as a download rather than something the browser tries to render",
     )
+    # Closed explicitly, and this is not tidiness. `send_from_directory` hands
+    # back a response holding an open handle to the file, and the test client
+    # never closes one for you. On Linux that is invisible - the delete below
+    # unlinks a file someone still has open and both succeed. On Windows, which
+    # is what this server actually runs on, the open handle makes the file
+    # undeletable and the delete fails. Leaving it open tested a platform the
+    # ground station is not.
+    r.close()
     check(client.get("/api/trip/ligmax/nope.gz").status_code == 404, "an unknown one is a 404")
 
     # Reading is open; deleting is not. A recording is evidence, and the people
