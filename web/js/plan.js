@@ -64,6 +64,37 @@ export function roleList(session) {
   }));
 }
 
+/* Presentation for the optional numeric columns. The *bounds* are deliberately
+ * not here: they come from `/api/session` -> `waypoint_limits`, out of the same
+ * `ligmax_gui/plan.py` table the validator refuses against.
+ *
+ * They used to be here, and speed drifted. The vessel dropped to its 5 kn limit
+ * (2.5722 m/s) and this file still said `max: 3`, so the editor accepted 2.8,
+ * the server returned 200, and the boat refused the *whole plan* — at 08:15, on
+ * a dock, with a course being typed in. The values below are only the fallback
+ * for a session payload that predates `waypoint_limits`, and speed's fallback is
+ * the vessel's real ceiling rather than a round number.
+ */
+const NUMERIC_STYLE = {
+  speed: { label: 'Speed', unit: 'm/s', step: 0.05, min: 0.05, max: 2.5722 },
+  hold_s: { label: 'Hold', unit: 's', step: 1, min: 0, max: 600 },
+};
+
+/** The optional numeric columns, with the server's own bounds merged in. */
+export function numericFields(session) {
+  const limits = session?.waypoint_limits ?? {};
+  const out = {};
+  for (const [field, style] of Object.entries(NUMERIC_STYLE)) {
+    const bounds = limits[field];
+    out[field] = {
+      ...style,
+      min: Number.isFinite(bounds?.min) ? bounds.min : style.min,
+      max: Number.isFinite(bounds?.max) ? bounds.max : style.max,
+    };
+  }
+  return out;
+}
+
 /* --- parsing a pasted course ------------------------------------------ */
 
 /* Words an operator might type for each role. The dropdown is the real

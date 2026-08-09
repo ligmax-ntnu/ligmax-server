@@ -9,7 +9,7 @@ loads beside the operator's own saved effects. Unlike `light-effects.json`
 that file is **source, not state**: it is committed, it is the same in every
 checkout, and nothing at runtime writes to it.
 
-Why generate it rather than hand-write it: a per-pixel frame is 101 colours
+Why generate it rather than hand-write it: a per-pixel frame is 100 colours
 and a smooth animation is dozens of frames, so these patterns are arithmetic -
 a hue ramp, a decaying tail, a cosine. Writing the arithmetic down keeps the
 file reviewable (read this, not 150 kB of hex) and re-derivable when the strip
@@ -53,12 +53,14 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from ligmax_gui import lights_effects  # noqa: E402
 
-NUM_LEDS = lights_effects.NUM_LEDS  # 101
+NUM_LEDS = lights_effects.NUM_LEDS  # 100
 
 # The wire-index split `/led_control` draws and `lights_esp.ino` renders: the
-# left side's 51 LEDs as 28 + 23, then the right side's own 22 + 28. Only used
-# by "Group walk", which exists to prove this ordering on the real hull.
-GROUPS = (28, 23, 22, 28)
+# left side's 51 LEDs as 28 + 23, then the right side's own 21 + 28. The third
+# group is 21, not 22 - one LED in that run failed on 2026-08-10 and was wired
+# out of the chain rather than replaced (see lights_esp.ino's header). Only
+# used by "Group walk", which exists to prove this ordering on the real hull.
+GROUPS = (28, 23, 21, 28)
 
 DEFAULT_OUT = REPO_ROOT / "ligmax_gui" / "light-effects-examples.json"
 
@@ -100,7 +102,7 @@ OFF = rgb(0, 0, 0)
 def rainbow_sweep(frames: int = 48) -> list[dict[str, Any]]:
     """One full hue wheel laid along the hull, travelling bow-ward.
 
-    The hue at wire index `i` is `i/101 + f/frames`, so the wheel closes on
+    The hue at wire index `i` is `i/100 + f/frames`, so the wheel closes on
     itself in space and has advanced exactly one whole wheel by the last
     frame - the loop is seamless in both directions.
     """
@@ -162,8 +164,8 @@ def group_walk() -> list[dict[str, Any]]:
     """Each of the four wire groups in turn, then all four together.
 
     Not decoration - this is the pattern you run once, on the real hull, to
-    learn which physical run of LEDs is wire index 0..27, 28..50, 51..72 and
-    73..100. That mapping is asserted in `/led_control`'s header comment and
+    learn which physical run of LEDs is wire index 0..27, 28..50, 51..71 and
+    72..99. That mapping is asserted in `/led_control`'s header comment and
     in `lights_esp.ino`, and has never been checked against the built boat.
     Colours are cyan/magenta/blue/white on purpose: none of them is a status
     colour, so nobody reads a wiring test as a state.
@@ -382,7 +384,7 @@ def teal_breathe(frames: int = 32) -> list[dict[str, Any]]:
     """The whole hull breathing teal, and the one example in string form.
 
     Every frame is a single colour, so each is written as one `"RRGGBB"`
-    instead of 101 copies of it - which is also what makes it go out as a
+    instead of 100 copies of it - which is also what makes it go out as a
     full-precision `COL` frame rather than a nibble `DATA` one. Teal, not
     white: a slow white breathe is the standby status, and this should not be
     mistakable for it.
@@ -426,7 +428,7 @@ EXAMPLES: list[tuple[str, str, list[dict[str, Any]]]] = [
     ),
     (
         "Group walk",
-        "Each of the four wire groups (28/23/22/28) alone, then all four - "
+        "Each of the four wire groups (28/23/21/28) alone, then all four - "
         "the pattern for checking wire order on the real hull.",
         group_walk(),
     ),
@@ -510,7 +512,7 @@ def build() -> str:
         lines.append(f'      "description": {json.dumps(description)},')
         lines.append('      "frames": [')
         for position, frame in enumerate(frames):
-            # One frame per line, keys in wire order: 101 colours pretty-printed
+            # One frame per line, keys in wire order: 100 colours pretty-printed
             # one per line would be 6000 lines an effect and unreviewable.
             hold = frame["hold_ms"]
             ordered = {

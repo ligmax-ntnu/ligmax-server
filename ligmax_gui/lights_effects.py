@@ -49,7 +49,12 @@ from typing import Any
 # MIN_HOLD_S/MAX_HOLD_S defaults, exactly like server.py's own copy of these
 # used to (now delegated here) - kept in step so a pattern that validates on
 # this box is one the vessel will actually accept.
-NUM_LEDS = 101
+#
+# 100, not 101, since 2026-08-10: one LED in the strip's 22-long forward-right
+# segment failed and was wired out rather than replaced, so that segment is 21
+# and the strip is 100 long - see lights_esp.ino's header and lights.py's own
+# NUM_LEDS default.
+NUM_LEDS = 100
 MAX_FRAMES = 60
 MIN_HOLD_MS = 20
 MAX_HOLD_MS = 60_000

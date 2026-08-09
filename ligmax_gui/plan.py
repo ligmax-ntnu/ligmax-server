@@ -47,6 +47,21 @@ MAX_NAME = 64
 #: The longest a per-waypoint note may be, matching the vessel's `[:120]`.
 MAX_NOTES = 120
 
+#: The vessel's speed limit: **5 knots**, which is a Njord rule rather than a
+#: number anyone tunes.  Mirrored from ``ligmax-pi/config.py`` (
+#: ``VESSEL_SPEED_LIMIT_MS``), where it is deliberately not overridable from the
+#: environment.
+#:
+#: This was 3.0 m/s here for as long as it was 3.0 on the vessel, and stayed
+#: behind when the boat dropped to the 5 kn limit on 2026-08-09.  The drift did
+#: exactly what the docstring above warns of and nothing else: the editor
+#: accepted 2.8, the server returned 200, and the boat refused **the whole
+#: plan** a second later with an ack nobody was looking at - at 08:15, on a
+#: dock, with the course being typed in.  ``plan.py`` on the vessel refuses
+#: rather than clamps, on purpose, so this bound is the only thing that can
+#: catch it while it is still being typed.
+VESSEL_SPEED_LIMIT_MS = 2.5722
+
 
 # The six behaviours, in the order they are offered in the editor's dropdown -
 # which is roughly the order a Njord course uses them.  `label` is what the
@@ -118,7 +133,7 @@ ROLES: dict[str, dict[str, Any]] = {
 #: something outside these is refused there too, so refusing here only moves the
 #: message forward in time.
 _LIMITS: dict[str, tuple[float, float]] = {
-    "speed": (0.05, 3.0),
+    "speed": (0.05, VESSEL_SPEED_LIMIT_MS),
     "radius": (0.3, 50.0),
     "hold_s": (0.0, 600.0),
     "berth_width_m": (0.5, 10.0),
@@ -136,6 +151,18 @@ def role_table() -> dict[str, dict[str, Any]]:
         }
         for name, spec in ROLES.items()
     }
+
+
+def limits_table() -> dict[str, dict[str, float]]:
+    """The numeric bounds for `/api/session`, so the editor's inputs match them.
+
+    Sent rather than hardcoded in the browser for the same reason ``role_table``
+    is: it was a third copy of a number that already lives in two repos, and it
+    was the copy the operator actually types into.  An ``<input max>`` that says
+    3 while the boat's ceiling is 2.5722 is a form that invites the one value it
+    will then reject.
+    """
+    return {field: {"min": low, "max": high} for field, (low, high) in _LIMITS.items()}
 
 
 def _finite(value: Any) -> float | None:
@@ -157,6 +184,15 @@ def _optional(item: dict[str, Any], field: str, position: int) -> tuple[Any, str
         return None, f"waypoint {position}: {field} is not a number"
     low, high = _LIMITS[field]
     if not (low <= number <= high):
+        if field == "speed" and number > high:
+            # Worded like the vessel's own refusal (`nodes/self_driving/plan.py`)
+            # rather than as a bare range, because "outside 0.05..2.5722" tells
+            # an operator under time pressure nothing at all - and a number over
+            # the limit is almost always knots typed into a m/s box.
+            return None, (
+                f"waypoint {position}: speed {number:g} m/s is over the 5 knot "
+                f"limit ({high:.2f} m/s) - lower it"
+            )
         return None, (
             f"waypoint {position}: {field} of {number:g} is outside {low:g}..{high:g}"
         )

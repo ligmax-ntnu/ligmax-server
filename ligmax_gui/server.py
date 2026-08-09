@@ -519,6 +519,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 # against. Adding a role on the vessel then means changing
                 # plan.py here and nothing in the frontend.
                 "waypoint_roles": planning.role_table(),
+                # And the numeric bounds beside them, for the same reason: the
+                # editor's `<input max>` was a third copy of the vessel's speed
+                # limit and it was the one that had drifted.
+                "waypoint_limits": planning.limits_table(),
                 "max_waypoints": planning.MAX_WAYPOINTS,
                 "vessel_status": protocol.VESSEL_STATUS,
                 "server_time": time.time(),

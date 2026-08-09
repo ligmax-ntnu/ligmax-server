@@ -22,9 +22,11 @@
   `ligmax_gui/light-effects-examples.json`), which are committed rather than
   machine-local and so are grouped apart and never deletable from here.
 
-  The strip is drawn as 101 LEDs in four groups - 28, 23, 22, 28 - in the same
-  order `lights.py`'s DATA/COL frames use (wire index 0..100). The last two
-  groups (22, 28) are exactly `lights_esp.ino`'s own right-side split (its
+  The strip is drawn as 100 LEDs in four groups - 28, 23, 21, 28 - in the same
+  order `lights.py`'s DATA/COL frames use (wire index 0..99). The third group
+  is 21, not 22: one LED in that run failed on 2026-08-10 and was wired out of
+  the chain rather than replaced (see `lights_esp.ino`'s header). The last two
+  groups (21, 28) are exactly `lights_esp.ino`'s own right-side split (its
   `renderFrame()` MAP 2 / MAP 3); the first two (28, 23) split the left side's
   LEFT_LEDS=51 the same way. Nothing here invents a hardware fact beyond that.
 
@@ -140,7 +142,7 @@
     padding: 7px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; background: var(--panel-2);
   }
   .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-  .thumb canvas { width: 101px; height: 16px; image-rendering: pixelated; border-radius: 3px; display: block; }
+  .thumb canvas { width: 100px; height: 16px; image-rendering: pixelated; border-radius: 3px; display: block; }
   .thumb-row { display: flex; align-items: center; gap: 4px; }
   .hold-input {
     width: 58px; background: var(--bg); border: 1px solid var(--line); color: var(--ink);
@@ -194,8 +196,8 @@
     </div>
     <p class="hint">
       Click or drag across LEDs to paint them the current colour. Groups shown
-      as counted on the boat: 28 · 23 · 22 · 28 (101 LEDs total, wire order
-      left to right).
+      as counted on the boat: 28 · 23 · 21 · 28 (100 LEDs total, wire order
+      left to right - one LED in the third group was wired out after it failed).
     </p>
   </section>
 
@@ -273,8 +275,10 @@
   'use strict';
 
   // Wire index order, per lights.py/lights_esp.ino - see the top-of-file comment.
-  const GROUPS = [28, 23, 22, 28];
-  const NUM_LEDS = GROUPS.reduce((a, b) => a + b, 0); // 101 - must match
+  // Third group is 21, not 22, since 2026-08-10 - a dead LED in that run was
+  // wired out rather than replaced.
+  const GROUPS = [28, 23, 21, 28];
+  const NUM_LEDS = GROUPS.reduce((a, b) => a + b, 0); // 100 - must match
                                                        // ligmax_gui/lights_effects.py's
                                                        // NUM_LEDS and lights.py's own default
   const OFF = '#000000';

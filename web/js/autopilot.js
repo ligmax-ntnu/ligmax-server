@@ -22,6 +22,7 @@
 import { sendCommand } from './api.js';
 import {
   describeRow,
+  numericFields,
   parseCourse,
   roleList,
   rowToWaypoint,
@@ -522,12 +523,6 @@ export class AutopilotPanel {
 
 /* --- the course editor ------------------------------------------------- */
 
-/** Optional numeric columns, and the range the server will accept. */
-const NUMERIC_FIELDS = {
-  speed: { label: 'Speed', unit: 'm/s', min: 0.05, max: 3, step: 0.05 },
-  hold_s: { label: 'Hold', unit: 's', min: 0, max: 600, step: 1 },
-};
-
 export class CoursePlanner {
   constructor(elements, store, { notify, canSend = true }) {
     this.elements = elements;
@@ -536,6 +531,9 @@ export class CoursePlanner {
     this.canSend = canSend;
     this.rows = [];
     this.roles = roleList(store.session);
+    // Bounds from the server, not from this file - see plan.js's note on the
+    // speed limit, which is the one that had already drifted.
+    this.numericFields = numericFields(store.session);
     this.defaultRole = this.roles[0]?.name ?? 'transit';
     /** Called with the current rows whenever they change, so a chart can draw them. */
     this.onRowsChange = null;
@@ -723,7 +721,7 @@ export class CoursePlanner {
     // "hold" box against a transit waypoint invites someone to fill it in and
     // then wonder why the boat drove straight past.
     const settles = this.roles.find((entry) => entry.name === row.role)?.settles;
-    for (const [field, spec] of Object.entries(NUMERIC_FIELDS)) {
+    for (const [field, spec] of Object.entries(this.numericFields)) {
       if (field === 'hold_s' && !settles) continue;
       const wrap = el('label', 'wp-num');
       wrap.append(el('span', 'wp-num-label', spec.label));
