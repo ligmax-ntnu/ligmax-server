@@ -525,6 +525,62 @@ export class AutopilotPanel {
   _updateDetail(block) {
     const rows = [];
     if (block.behaviour) rows.push(['Behaviour', block.behaviour]);
+    if (block.phase) rows.push(['Phase', String(block.phase)]);
+
+    // The parking space, for the operator tuning the depth offset. The chart draws
+    // the same numbers as a picture; this is where you read them off. `x.xx m in`
+    // is how deep the dot sits measured from the lone line — the side of the space
+    // with no partner — which is the figure the offset is set against.
+    const parking = block.parking;
+    if (parking?.seen) {
+      const parts = [];
+      if (Number.isFinite(parking.mouth_m) && Number.isFinite(parking.depth_m)) {
+        parts.push(`${parking.mouth_m.toFixed(2)} x ${parking.depth_m.toFixed(2)} m`);
+      }
+      if (parking.depth_source === 'nominal') {
+        // The lidar saw a depth it did not believe, so the configured figure is in
+        // use. Worth saying: it is the difference between "the space is smaller
+        // than we thought" and "we can only see half of it".
+        parts.push('depth from config, not measured');
+      }
+      if (Number.isFinite(parking.dot_depth_m)) {
+        parts.push(`dot ${parking.dot_depth_m.toFixed(2)} m in`);
+      }
+      if (Number.isFinite(parking.offset_m) && parking.offset_m !== 0) {
+        parts.push(
+          `offset ${parking.offset_m > 0 ? '+' : ''}${parking.offset_m.toFixed(2)} m` +
+            (parking.offset_clamped ? ' (CLAMPED)' : '')
+        );
+      } else if (parking.offset_clamped) {
+        parts.push('offset CLAMPED to the space');
+      }
+      if (Number.isFinite(parking.age_s) && parking.age_s > 2) {
+        parts.push(`last seen ${parking.age_s.toFixed(0)} s ago`);
+      }
+      rows.push(['Parking space', parts.join(' · ')]);
+
+      // The angle, separately, because it is half of what the countdown needs and
+      // the half that is easy to miss: the boat can be on the dot to a hand's
+      // width and still not be parked. An alongside park reaches its angle by
+      // rotating 90 degrees *inside* the space, so this is also where the turn is
+      // visible.
+      if (Number.isFinite(parking.park_heading_deg)) {
+        const angle = [`${parking.park_heading_deg.toFixed(0)}°`];
+        if (Number.isFinite(parking.heading_error_deg)) {
+          angle.push(`${parking.heading_error_deg.toFixed(0)}° off`);
+        }
+        rows.push(['Parking angle', angle.join(' · ')]);
+      }
+    } else if (parking) {
+      // Not found yet, and the segment count is the number that says why: 0 means
+      // the lidar is giving the fitter nothing, 1-2 means it is seeing part of the
+      // space and is probably off its axis. See docs/testing.md 7j.
+      const segments = Number.isFinite(parking.segments) ? parking.segments : 0;
+      rows.push([
+        'Parking space',
+        `not found — ${segments} line(s) in view of the three it needs`,
+      ]);
+    }
 
     const commander = block.commander ?? {};
     if (commander.intent) {

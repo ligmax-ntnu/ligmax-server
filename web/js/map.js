@@ -35,6 +35,14 @@ const PALETTE = {
   boat: '#ffffff',
   trail: '#7fb0ff',
   cog: '#9ee6a8',
+  // The parking space the vessel has fitted to three lidar lines, and the dot in
+  // the middle of it that it is driving to. Amber-gold, matching the `park` role's
+  // diamond in `plan.js`, so the waypoint and the space it turned out to be read
+  // as the same thing. The dot itself is white and is the only white circle on the
+  // chart — it is the one point the whole manoeuvre is about.
+  park: '#ffc21f',
+  parkFaint: 'rgba(255, 194, 31, 0.42)',
+  parkDot: '#ffffff',
 };
 
 const GRID_STEPS = [0.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2000];
@@ -523,6 +531,9 @@ export class WorldMap {
     if (this.missionDraft.length) this._drawMissionDraft(ctx);
     this._drawTracks(ctx, state);
     if (this.layers.trail) this._drawTrail(ctx);
+    // Under the boat, deliberately: the hull is what you are steering and it must
+    // never be hidden by the space it is steering into.
+    this._drawParking(ctx, state);
     this._drawBoat(ctx, state);
     this._drawHud(ctx, state);
   }
@@ -1012,6 +1023,152 @@ export class WorldMap {
     ctx.restore();
   }
 
+  /**
+   * The parking space the vessel has found, and the dot in the middle of it.
+   *
+   * Everything drawn here is measured on the boat and arrives in world metres
+   * (`telemetry.autopilot.parking`, from `behaviours/parking.py`), so this adds
+   * only colour — no geometry is recomputed in the browser, because a second
+   * implementation of the box arithmetic is a second thing that can disagree with
+   * the boat about where the boat is going.
+   *
+   * Three things are drawn and they are deliberately distinguishable:
+   *
+   *   the three lines   thick and solid. These are *measurements* — the lidar
+   *                     returns fitted to edges. If they do not lie on top of the
+   *                     structure in the satellite imagery, the fix or the grid is
+   *                     out and nothing else on this overlay means anything.
+   *   the rectangle     thin and dashed, open at the mouth. This is *inference* —
+   *                     the space the boat believes those three lines imply.
+   *   the dot           white, ringed. Where the boat is actually going.
+   *
+   * Solid for measured and dashed for inferred is the same convention the scan and
+   * the planned path already use, so a glance says which half to distrust.
+   */
+  _drawParking(ctx, state) {
+    const parking = state.telemetry?.autopilot?.parking;
+    if (!parking?.seen) return;
+
+    const lines = Array.isArray(parking.lines) ? parking.lines : [];
+    const corners = Array.isArray(parking.corners) ? parking.corners : [];
+    const target = parking.target;
+
+    // A space nobody has looked at for a while is drawn faded rather than
+    // removed: during the hold the boat is inside it and sees the least of it,
+    // and a rectangle that blinks out at the moment of the manoeuvre is worse
+    // than one that says "this is remembered".
+    const age = Number.isFinite(parking.age_s) ? parking.age_s : 0;
+    const stale = age > 2;
+
+    ctx.save();
+    ctx.globalAlpha = stale ? 0.55 : 1;
+
+    if (corners.length === 4) {
+      const screen = corners.map(([x, y]) => this.worldToScreen(x, y));
+      // The three closed sides, in order: mouth -> back -> back -> mouth.
+      ctx.strokeStyle = PALETTE.parkFaint;
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      screen.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.stroke();
+      // The mouth, dotted much finer — it is the way in, not a wall, and it is the
+      // one edge that is not there.
+      ctx.setLineDash([2, 5]);
+      ctx.beginPath();
+      ctx.moveTo(screen[3][0], screen[3][1]);
+      ctx.lineTo(screen[0][0], screen[0][1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.strokeStyle = PALETTE.park;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    for (const line of lines) {
+      if (!Array.isArray(line) || line.length < 2) continue;
+      const [ax, ay] = this.worldToScreen(line[0][0], line[0][1]);
+      const [bx, by] = this.worldToScreen(line[1][0], line[1][1]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+
+    if (Array.isArray(target)) {
+      const [tx, ty] = this.worldToScreen(target[0], target[1]);
+      ctx.strokeStyle = PALETTE.parkDot;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(tx - 11, ty);
+      ctx.lineTo(tx - 4, ty);
+      ctx.moveTo(tx + 4, ty);
+      ctx.lineTo(tx + 11, ty);
+      ctx.moveTo(tx, ty - 11);
+      ctx.lineTo(tx, ty - 4);
+      ctx.moveTo(tx, ty + 4);
+      ctx.lineTo(tx, ty + 11);
+      ctx.stroke();
+      ctx.fillStyle = PALETTE.parkDot;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      // The angle the hull has to sit at for the hold to count: square to the
+      // closed end for a bow-in park, 90 degrees off it for an alongside one. Drawn
+      // as a bar through the dot, because "is the boat on the spot" and "is the boat
+      // at the right angle" are two separate questions and the second one cannot be
+      // answered by eye without something to compare the hull against.
+      if (Number.isFinite(parking.park_heading_deg) && this.camera.ppm > 3) {
+        const grid = ((parking.park_heading_deg - (state.grid_bearing ?? 0)) * Math.PI) / 180;
+        const reach = Math.max(16, 1.2 * this.camera.ppm);
+        const dx = Math.sin(grid) * reach;
+        const dy = -Math.cos(grid) * reach;
+        const off = Number.isFinite(parking.heading_error_deg)
+          ? parking.heading_error_deg
+          : 0;
+        ctx.save();
+        // Green once the hull is inside the gate the countdown needs, amber while
+        // it is still swinging. The threshold is the vessel's own
+        // PARK_HOLD_ANGLE_DEG; 10 deg is duplicated here only as a display cue, and
+        // the vessel remains the only thing that decides whether the hold counts.
+        ctx.strokeStyle = off <= 10 ? PALETTE.cog : PALETTE.park;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        ctx.moveTo(tx - dx, ty - dy);
+        ctx.lineTo(tx + dx, ty + dy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // How the dot was placed, close in only: the measured span of the space and
+      // the static offset that moved the dot off its middle. This is the readback
+      // the offset is tuned against, and it belongs next to the dot rather than
+      // three panels away on the other page.
+      if (this.camera.ppm > 6 && Number.isFinite(parking.dot_depth_m)) {
+        const offset = Number.isFinite(parking.offset_m) ? parking.offset_m : 0;
+        const label =
+          `${parking.dot_depth_m.toFixed(2)} m in` +
+          (offset ? ` (offset ${offset > 0 ? '+' : ''}${offset.toFixed(2)})` : '') +
+          (parking.offset_clamped ? ' clamped' : '');
+        ctx.font = '600 10px ui-monospace, monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const metrics = ctx.measureText(label);
+        ctx.fillStyle = 'rgba(10, 17, 40, 0.68)';
+        ctx.fillRect(tx + 12, ty - 7, metrics.width + 6, 14);
+        ctx.fillStyle = parking.offset_clamped ? '#ffb0a8' : PALETTE.park;
+        ctx.fillText(label, tx + 15, ty);
+      }
+    }
+    ctx.restore();
+  }
+
   _drawTracks(ctx, state) {
     const tracks = state.tracks ?? [];
     const showLabels = this.layers.labels && this.camera.ppm > 1.6;
@@ -1264,6 +1421,76 @@ export class WorldMap {
       ctx.lineWidth = 2.4;
       ctx.stroke();
     }
+
+    this._drawHoldTimer(ctx, state, sx, sy, length);
+  }
+
+  /**
+   * The hold countdown, beside the boat.
+   *
+   * Next to the hull rather than in a panel, because the question it answers is
+   * "can I look away yet" and the thing being watched is the boat. It follows the
+   * boat around the chart and it is the only number drawn on the vessel itself.
+   *
+   * The seconds come from the vessel already counted down
+   * (`telemetry.autopilot.hold_remaining_s`) rather than being run off a local
+   * clock. That is the difference between a timer and a *readback*: a browser
+   * counting its own seconds keeps counting when the link drops, and would sit
+   * there ticking confidently towards zero for a boat that stopped reporting ten
+   * seconds ago. This one goes stale and stops, which is the honest failure.
+   *
+   * Nothing here is parking-specific. Any behaviour that publishes
+   * `hold_remaining_s` gets the same widget.
+   */
+  _drawHoldTimer(ctx, state, sx, sy, length) {
+    const autopilot = state.telemetry?.autopilot;
+    const remaining = autopilot?.hold_remaining_s;
+    if (!Number.isFinite(remaining)) return;
+
+    const required = Number.isFinite(autopilot?.hold_required_s)
+      ? autopilot.hold_required_s
+      : null;
+    const seconds = `${remaining.toFixed(1)} s`;
+    const caption = required ? `holding ${required.toFixed(0)} s` : 'holding';
+    const restarts = autopilot?.hold_restarts;
+    const warn = Number.isFinite(restarts) && restarts > 0;
+
+    ctx.save();
+    ctx.font = '700 15px ui-monospace, monospace';
+    const width = Math.max(ctx.measureText(seconds).width, 66) + 16;
+    const height = 34;
+    // Screen-right of the hull, flipping to the left near the edge so the number
+    // is never the thing that falls off the canvas.
+    const gap = Math.max(14, length * 0.75);
+    let x = sx + gap;
+    if (x + width > this.width - 6) x = sx - gap - width;
+    const y = sy - height / 2;
+
+    ctx.fillStyle = 'rgba(10, 17, 40, 0.82)';
+    ctx.strokeStyle = warn ? 'rgba(239, 198, 61, 0.95)' : PALETTE.park;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.roundRect?.(x, y, width, height, 6);
+    if (!ctx.roundRect) ctx.rect(x, y, width, height);
+    ctx.fill();
+    ctx.stroke();
+
+    // A bar across the bottom for how much of the hold is left, so the number does
+    // not have to be read to see that it is going down.
+    if (required > 0) {
+      const done = Math.max(0, Math.min(1, 1 - remaining / required));
+      ctx.fillStyle = 'rgba(255, 194, 31, 0.9)';
+      ctx.fillRect(x + 1, y + height - 3.5, (width - 2) * done, 2.5);
+    }
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = PALETTE.ink;
+    ctx.fillText(seconds, x + 8, y + 4);
+    ctx.font = '600 9px system-ui, sans-serif';
+    ctx.fillStyle = warn ? '#efc63d' : PALETTE.muted;
+    ctx.fillText(warn ? `restarted ${restarts}x` : caption, x + 8, y + 21);
+    ctx.restore();
   }
 
   _drawHud(ctx, state) {

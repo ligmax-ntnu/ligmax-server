@@ -15,7 +15,16 @@
  */
 
 /** Display order in the dropdown, and the order the legend uses. */
-export const ROLE_ORDER = ['transit', 'buoys', 'avoid', 'hold', 'dock', 'dock_parallel'];
+export const ROLE_ORDER = [
+  'transit',
+  'buoys',
+  'avoid',
+  'hold',
+  'dock',
+  'dock_parallel',
+  'park',
+  'park_parallel',
+];
 
 /* Colour and glyph per role.
  *
@@ -25,9 +34,14 @@ export const ROLE_ORDER = ['transit', 'buoys', 'avoid', 'hold', 'dock', 'dock_pa
  * shoulder. Hence also the shape split: obstacles are filled circles and hulls,
  * waypoints are diamonds carrying a letter.
  *
- * `transit` is deliberately the quietest of the six. It is the default and the
+ * `transit` is deliberately the quietest of the eight. It is the default and the
  * most common, and a course that is mostly transit should read as mostly plain,
  * so the legs that *do* carry a rule stand out.
+ *
+ * The two parking roles borrow the docking hues rather than taking new ones: they
+ * are the same berth by a different method (three lines instead of a gap), and a
+ * chart being read over someone's shoulder should say "this is the docking leg"
+ * first and "by which method" second. The letters are what tell them apart.
  */
 export const ROLE_STYLE = {
   transit: { colour: '#8fa8cf', code: 'T', short: 'Transit' },
@@ -36,6 +50,8 @@ export const ROLE_STYLE = {
   hold: { colour: '#b48ef7', code: 'H', short: 'Hold' },
   dock: { colour: '#ffd23f', code: 'D', short: 'Dock' },
   dock_parallel: { colour: '#f78ec6', code: 'P', short: 'Parallel dock' },
+  park: { colour: '#ffc21f', code: 'K', short: 'Park' },
+  park_parallel: { colour: '#f26fb4', code: 'L', short: 'Parallel park' },
 };
 
 const FALLBACK_STYLE = { colour: '#8b98ae', code: '?', short: 'Unknown role' };
@@ -125,6 +141,14 @@ const ROLE_WORDS = {
   dock_parallel: 'dock_parallel',
   parallel: 'dock_parallel',
   alongside: 'dock_parallel',
+  park: 'park',
+  parking: 'park',
+  lines: 'park',
+  park_parallel: 'park_parallel',
+  parallelpark: 'park_parallel',
+  // `parallel` on its own stays with `dock_parallel` above, because it was there
+  // first and a pasted course written before parking existed must keep meaning
+  // what it meant. Say `park_parallel` for the line-based one.
 };
 
 const NUMBER = /^[-+]?\d*\.?\d+$/;
@@ -246,7 +270,7 @@ export function rowToWaypoint(row, index) {
     waypoint.x = row.x;
     waypoint.y = row.y;
   }
-  for (const field of ['speed', 'hold_s', 'radius', 'berth_width_m']) {
+  for (const field of ['speed', 'hold_s', 'radius', 'berth_width_m', 'park_offset_m']) {
     if (Number.isFinite(row[field])) waypoint[field] = row[field];
   }
   if (row.notes) waypoint.notes = row.notes;

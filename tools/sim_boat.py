@@ -83,7 +83,31 @@ for _index in range(9):  # a shoreline off to port
                    "type": OBSTACLE_TYPES["LAND"], "avoid_radius": 4.2})
 
 WAYPOINTS = [(0.0, 20.0), (-1.0, 45.0), (1.2, 70.0), (-2.0, 95.0),
-             (0.5, 120.0), (0.0, 148.0)]
+             (0.5, 120.0), (0.0, 148.0), (0.0, 151.0)]
+
+# The parking space at the end of the course: three sides of a 2 m square whose
+# corners do not meet, opening south towards the boat. The real one is measured
+# from the lidar every tick (`ligmax-pi/nodes/self_driving/perception/parking.py`);
+# this one is a fixed rectangle, and it exists so the chart's parking overlay and
+# the hold countdown beside the boat can be worked on with no vessel present.
+#
+# Grid metres, in the same frame as everything else here. `north_mouth` is the way
+# in; the closed end - the one line with no partner, which the depth offset is
+# measured from - is `depth_m` further north.
+PARK_EAST_M = 0.0
+PARK_MOUTH_NORTH_M = 150.0
+PARK_MOUTH_M = 2.0
+PARK_DEPTH_M = 2.0
+PARK_CORNER_GAP_M = 0.15
+
+# How long the boat sits on the dot. Ten seconds, which is what the vessel's
+# `PARK_HOLD_S` defaults to.
+PARK_HOLD_S = 10.0
+
+# How close the boat has to be before the space is "found". Stands in for what the
+# lidar can actually see into a 2 m box, which is about 4 m on the centreline -
+# generous here, because the point is to have something on the chart to look at.
+PARK_ACQUIRE_M = 14.0
 
 # The ideal route, as the course would be handed over: a list of GNSS points
 # through the middle of each gate. This is published as a second path with
@@ -94,7 +118,7 @@ WAYPOINTS = [(0.0, 20.0), (-1.0, 45.0), (1.2, 70.0), (-2.0, 95.0),
 # targets off the gate centres to keep clear of the buoys' avoid radii, and if
 # the two lines were identical the plot would prove nothing.
 IDEAL_ROUTE = [(0.0, 0.0), *[((rx + gx) / 2.0, (ry + gy) / 2.0)
-                             for rx, ry, gx, gy in GATES], (0.0, 152.0)]
+                             for rx, ry, gx, gy in GATES], (0.0, 151.0)]
 
 # What each leg of that route is *for*. A Njord course is a list of places plus
 # the rules in force between them, and the roles are what the chart colours its
@@ -105,7 +129,7 @@ IDEAL_ROUTE = [(0.0, 0.0), *[((rx + gx) / 2.0, (ry + gy) / 2.0)
 #
 # Must be the same length as IDEAL_ROUTE, and mirrors the names in
 # `ligmax_gui/plan.py`'s ROLES.
-ROUTE_ROLES = ["transit", "buoys", "buoys", "avoid", "buoys", "hold", "dock"]
+ROUTE_ROLES = ["transit", "buoys", "buoys", "avoid", "buoys", "hold", "park"]
 ROUTE_NAMES = ["1", "1.1", "1.2", "2", "2.1", "3", "4"]
 
 # How the simulated pack behaves. The real figures come off the Daly BMS over
@@ -218,6 +242,10 @@ class Sim:
         self.autopilot_stuck = False
         self.recording = False
         self.plan_index = 0
+        # The parking hold at the end of the course. `None` until the boat reaches
+        # the dot, then the moment it got there - which is what the countdown on
+        # the chart is measured from.
+        self.park_hold_from: float | None = None
 
     # -- motion -------------------------------------------------------------
 
@@ -251,9 +279,19 @@ class Sim:
                     self.waypoint_index += 1
                     self.plan_index = min(self.plan_index + 1, len(ROUTE_ROLES) - 1)
                     events.append(("INFO", f"waypoint {self.waypoint_index} reached"))
-                else:
+                elif self.park_hold_from is None:
+                    # The last waypoint is the dot in the middle of the parking
+                    # space, so arriving there starts the ten-second hold rather
+                    # than ending the run. The real behaviour wants 0.2 m and this
+                    # accepts 1.2, because the kinematics here are too crude to
+                    # park to a hand's width - what is being exercised is the
+                    # countdown and the overlay, not the control loop.
+                    self.park_hold_from = time.time()
+                    events.append(("INFO", "parked on the dot - holding 10 s"))
+                elif time.time() - self.park_hold_from >= PARK_HOLD_S:
                     self.waypoint_index = 0
                     self.plan_index = 0
+                    self.park_hold_from = None
                     self.x, self.y = 0.0, 0.0
                     events.append(("INFO", "course complete, restarting run"))
             elif self.goto is not None and distance <= 1.2:
@@ -489,6 +527,74 @@ class Sim:
             }
         ]
 
+    def parking(self) -> dict | None:
+        """`telemetry.autopilot.parking` - the space, the dot, and the countdown.
+
+        Mirrors what `ligmax-pi/nodes/self_driving/behaviours/parking.py` publishes,
+        in the same world metres, so the chart's overlay is exercised by exactly the
+        payload a real boat sends. The difference is only in where the numbers come
+        from: three fitted lidar lines there, one hardcoded rectangle here.
+
+        None until the boat is close enough for the space to have been "found",
+        because a chart that draws the berth from the start of the course would hide
+        the failure that actually matters - the boat never finding it.
+        """
+        half_mouth = PARK_MOUTH_M / 2.0
+        back = PARK_MOUTH_NORTH_M + PARK_DEPTH_M
+        centre = (PARK_EAST_M, PARK_MOUTH_NORTH_M + PARK_DEPTH_M / 2.0)
+        if math.hypot(centre[0] - self.x, centre[1] - self.y) > PARK_ACQUIRE_M:
+            return None
+
+        low, high = PARK_EAST_M - half_mouth, PARK_EAST_M + half_mouth
+        gap = PARK_CORNER_GAP_M
+        held = 0.0 if self.park_hold_from is None else time.time() - self.park_hold_from
+        holding = self.park_hold_from is not None and held < PARK_HOLD_S
+
+        return {
+            "seen": True,
+            "kind": "park",
+            # Offset zero, so the dot is the middle of the space. Change
+            # PARK_DEPTH_M above rather than moving this: the whole point of the
+            # overlay is that the dot is derived from the space.
+            "target": [round(centre[0], 2), round(centre[1], 2)],
+            "centre": [round(centre[0], 2), round(centre[1], 2)],
+            # mouth, closed end, closed end, mouth - the order the chart draws as an
+            # open U, with the way in left open.
+            "corners": [
+                [low, PARK_MOUTH_NORTH_M],
+                [low, back],
+                [high, back],
+                [high, PARK_MOUTH_NORTH_M],
+            ],
+            # The three lines, with the corners deliberately not meeting.
+            "lines": [
+                [[low + gap, back], [high - gap, back]],
+                [[low, PARK_MOUTH_NORTH_M], [low, back - gap]],
+                [[high, PARK_MOUTH_NORTH_M], [high, back - gap]],
+            ],
+            "into_deg": 0.0,
+            # The angle the hull has to hold for the countdown to count. This sim
+            # parks bow-in, so it is the same as the way in; an alongside park
+            # rotates 90 degrees off it once inside the space.
+            "park_heading_deg": 0.0,
+            # `heading_deg` rather than `self.heading`, which is grid radians with
+            # pi/2 for north - the compass property is the one that matches the
+            # bearing above.
+            "heading_error_deg": round(abs(wrap180(self.heading_deg - 0.0)), 1),
+            "mouth_m": PARK_MOUTH_M,
+            "depth_m": PARK_DEPTH_M,
+            "depth_measured_m": PARK_DEPTH_M,
+            "depth_source": "measured",
+            "offset_m": 0.0,
+            "offset_clamped": False,
+            "dot_depth_m": round(PARK_DEPTH_M / 2.0, 2),
+            "corner_gap_m": PARK_CORNER_GAP_M,
+            "age_s": 0.0,
+            "hold_required_s": PARK_HOLD_S,
+            "hold_remaining_s": round(max(0.0, PARK_HOLD_S - held), 1) if holding else None,
+            "segments": 3,
+        }
+
     def autopilot(self) -> dict:
         """`telemetry.autopilot`, shaped like the autonomy node's own block.
 
@@ -508,6 +614,7 @@ class Sim:
             "avoid": "vessel crossing from starboard - giving way, turning to pass astern",
             "hold": "arrived; holding station until told otherwise",
             "dock": "berth found from the lidar, 2.0 m gap - lining up bow-in",
+            "park": "three lines found - creeping onto the dot in the middle",
         }
 
         if self.estop:
@@ -565,6 +672,25 @@ class Sim:
         }
         if blocked:
             block["blocked"] = blocked
+
+        # The parking overlay and the hold countdown. `hold_remaining_s` is
+        # published at the top level as well as inside `parking`, because the timer
+        # beside the boat on the chart is deliberately not parking-specific - any
+        # behaviour that holds can drive it.
+        parking = self.parking()
+        if parking is not None:
+            block["parking"] = parking
+            block["phase"] = (
+                "hold" if parking["hold_remaining_s"] is not None else "enter"
+            )
+            block["hold_required_s"] = parking["hold_required_s"]
+            if parking["hold_remaining_s"] is not None:
+                block["hold_remaining_s"] = parking["hold_remaining_s"]
+                block["reason"] = (
+                    f"parked on the dot - holding "
+                    f"{PARK_HOLD_S - parking['hold_remaining_s']:.0f}/"
+                    f"{PARK_HOLD_S:.0f} s"
+                )
         return block
 
     def telemetry(self) -> dict:

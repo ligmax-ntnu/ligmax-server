@@ -63,12 +63,20 @@ MAX_NOTES = 120
 VESSEL_SPEED_LIMIT_MS = 2.5722
 
 
-# The six behaviours, in the order they are offered in the editor's dropdown -
+# The eight behaviours, in the order they are offered in the editor's dropdown -
 # which is roughly the order a Njord course uses them.  `label` is what the
 # operator picks from; `help` is what the row's title text says; `settles` marks
 # the ones that are a place to *arrive at and stop*, which the vessel treats
 # differently (a tighter acceptance radius, and it refuses to count them as
 # passed just because the boat swept past).
+#
+# There are **two** pairs of docking roles and that is deliberate.  `dock*` finds a
+# berth as a gap between two structures and keeps the ordinary obstacle avoidance
+# on; `park*` finds it as three lines making a rectangle with open corners, parks
+# on the middle of that rectangle plus a static per-type depth offset, and ignores
+# the world model entirely - no buoy colours, no clearances, no avoidance.  Neither
+# has met the water, so both are offered and the operator picks per waypoint on the
+# day.  See `ligmax-pi/nodes/self_driving/behaviours/parking.py`.
 ROLES: dict[str, dict[str, Any]] = {
     "transit": {
         "label": "Transit",
@@ -127,6 +135,27 @@ ROLES: dict[str, dict[str, Any]] = {
         "settles": True,
         "default_hold_s": 5.0,
     },
+    "park": {
+        "label": "Park (bow-in, lines)",
+        "help": (
+            "Find three lines making a square with open corners, sit on the "
+            "middle of it for 10 s, then REVERSE out. Buoys are ignored "
+            "entirely. 'Park offset' moves the dot deeper in; positive is "
+            "towards the closed end."
+        ),
+        "settles": True,
+        "default_hold_s": 10.0,
+    },
+    "park_parallel": {
+        "label": "Park (alongside, lines)",
+        "help": (
+            "The same three lines, 4 m along the dock instead of 2, entered "
+            "alongside: sit on the middle for 10 s, then continue forward. Has "
+            "its own park offset, separate from the bow-in one."
+        ),
+        "settles": True,
+        "default_hold_s": 10.0,
+    },
 }
 
 #: Optional per-waypoint numbers, and the range the vessel will accept.  Sending
@@ -137,6 +166,11 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "radius": (0.3, 50.0),
     "hold_s": (0.0, 600.0),
     "berth_width_m": (0.5, 10.0),
+    # How deep into a parking space to sit, metres from its middle, positive
+    # towards the closed end.  Signed, because "half a metre short of the middle"
+    # is as ordinary a request as "half a metre deeper".  The vessel clamps it to
+    # the space it actually measured as well, and says on the panel when it had to.
+    "park_offset_m": (-3.0, 3.0),
 }
 
 
