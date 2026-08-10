@@ -35,7 +35,11 @@ os.environ["LIGMAX_COOKIE_SECRET"] = "cookie-secret"
 os.environ["LIGMAX_RTK_ENABLED"] = "0"
 
 from ligmax_gui import trips  # noqa: E402
-from ligmax_gui.server import COMMAND_SPECS, create_app  # noqa: E402
+from ligmax_gui.server import (  # noqa: E402
+    COMMAND_SPECS,
+    MAX_SPEED_LIMIT_MS,
+    create_app,
+)
 
 VERBOSE = "-v" in sys.argv
 FAILURES: list[str] = []
@@ -164,6 +168,44 @@ def test_command_specs():
     check(r.status_code == 400, "compass_cal refuses a non-numeric heading")
     r = client.post("/api/command", json={"name": "compass_cal", "args": {"heading": 451.5}})
     check(r.status_code == 200, "a heading past 360 is wrapped, not refused")
+
+    # The go-to and its speed cap, implemented on the vessel 2026-08-10
+    # (ligmax-pi/nodes/io_manager/guided.py). The cap is bounded by NJORD's 5
+    # knots and **refused rather than clamped**: an operator who asked for 4 m/s
+    # and silently got 2.57 would believe the boat was doing 4.
+    r = client.post("/api/command", json={"name": "set_speed_limit", "args": {"value": 1.0}})
+    check(r.status_code == 200, f"a 1 m/s cap is accepted ({r.status_code})")
+    r = client.post(
+        "/api/command", json={"name": "set_speed_limit", "args": {"value": MAX_SPEED_LIMIT_MS}}
+    )
+    check(r.status_code == 200, "the vessel limit itself is accepted")
+    for bad in (4.0, 0.05, float("nan"), float("inf")):
+        r = client.post(
+            "/api/command", json={"name": "set_speed_limit", "args": {"value": bad}}
+        )
+        check(r.status_code == 400, f"set_speed_limit refuses {bad!r} ({r.status_code})")
+    check(
+        MAX_SPEED_LIMIT_MS < 2.58,
+        f"the ceiling is 5 knots, not something looser ({MAX_SPEED_LIMIT_MS:.4f} m/s)",
+    )
+
+    r = client.post("/api/command", json={"name": "goto", "args": {"x": 12.0, "y": -30.0}})
+    check(r.status_code == 200, f"a go-to takes grid metres ({r.status_code})")
+    r = client.post("/api/command", json={"name": "goto", "args": {"x": 12.0}})
+    check(r.status_code == 400, "a go-to needs both coordinates")
+    for bad in (float("nan"), float("inf")):
+        r = client.post("/api/command", json={"name": "goto", "args": {"x": bad, "y": 0}})
+        check(r.status_code == 400, f"a go-to refuses x={bad!r} ({r.status_code})")
+
+    # And the three that were removed the same day rather than implemented:
+    # hold/resume are the autopilot panel's autopilot_pause/autopilot_resume, and
+    # `raw` aimed an arbitrary payload at the vessel, which is the one thing this
+    # allow-list exists to prevent. All three used to render as working buttons
+    # and ack "not implemented" a second later (findings.md item 34).
+    for gone in ("hold", "resume", "raw"):
+        check(gone not in COMMAND_SPECS, f"{gone} is no longer advertised")
+        r = client.post("/api/command", json={"name": gone, "args": {}})
+        check(r.status_code == 400, f"{gone} is refused outright ({r.status_code})")
 
     # Still an allow-list. This is the property that makes a stray fetch() from a
     # browser console unable to invent vessel behaviour.

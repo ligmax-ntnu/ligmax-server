@@ -874,22 +874,6 @@
   font-size: 0.83rem;
 }
 
-.raw-command {
-  border-top: 1px solid var(--line);
-  padding-top: 0.6rem;
-}
-
-.raw-command summary {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.raw-command textarea {
-  margin: 0.5rem 0;
-}
-
 /* --- tuning bench ---------------------------------------------------- */
 
 .tune-tools {

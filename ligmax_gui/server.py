@@ -79,6 +79,14 @@ MAX_MISSION_WAYPOINTS = 100
 MIN_LIGHTS_FPS = 1.0
 MAX_LIGHTS_FPS = 60.0
 
+# `set_speed_limit`'s bounds, mirroring ligmax-pi/nodes/io_manager/guided.py's
+# MIN_LIMIT_MS/MAX_LIMIT_MS - which are in turn NJORD's 5 knots out of that
+# repo's config.py, the number the vessel enforces and no dashboard can raise.
+# Refused here as well as there so an operator who types 4 is told immediately
+# instead of watching the row come back "failed" a second later.
+MIN_SPEED_LIMIT_MS = 0.2
+MAX_SPEED_LIMIT_MS = 5.0 * 0.514444  # 2.5722 m/s
+
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
 # fetch() from a browser console cannot invent new vessel behaviour.
 #
@@ -105,10 +113,14 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "confirm": True,
         "danger": True,
     },
-    "hold": {"label": "Hold position", "args": {}},
-    "resume": {"label": "Resume mission", "args": {}},
     "arm": {"label": "Arm propulsion", "args": {}, "confirm": True},
     "disarm": {"label": "Disarm propulsion", "args": {}},
+    # One point on the chart, in grid metres, held by the autopilot in GUIDED
+    # until it arrives - ligmax-pi/nodes/io_manager/guided.py. The hand-flown
+    # route: no planner, no obstacle avoidance, no stored route. The vessel
+    # refuses it outside GUIDED, while disarmed, and with the E-stop engaged,
+    # rather than switching anything on the operator's behalf, so a refusal here
+    # is normal and says which of those it was.
     "goto": {"label": "Go to point", "args": {"x": "float", "y": "float"}},
     # An admin-laid route, grid metres like `goto` - see
     # ligmax-pi/nodes/io_manager/mission.py. The vessel uploads it as a real
@@ -117,7 +129,18 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # a route and setting it moving are always two distinct, audited commands.
     "set_mission": {"label": "Send mission", "args": {"points": "any"}, "confirm": True},
     "clear_waypoints": {"label": "Clear waypoints", "args": {}},
-    "set_speed_limit": {"label": "Speed limit", "args": {"value": "float"}},
+    # The ground speed a `goto` travels at, in m/s, and - because the vessel
+    # sends it on as DO_CHANGE_SPEED - the speed an AUTO mission runs at too.
+    # Bounded above by NJORD's 5 knots (MAX_SPEED_LIMIT_MS), which nothing from
+    # here can raise. It is NOT the autonomy node's ceiling: that is careful mode
+    # and rides up as `autopilot.commander.speed_ceiling_kn`, shown separately on
+    # the autopilot panel. Logged at WARN for the same reason a gain is - a boat
+    # that is suddenly slower is a thing somebody will come looking for.
+    "set_speed_limit": {
+        "label": "Speed limit",
+        "args": {"value": "float"},
+        "log_level": "WARN",
+    },
     "recentre_origin": {"label": "Re-zero grid origin", "args": {}, "confirm": True},
     # One stabilisation gain or trim, written into the flight controller's own
     # storage by ligmax-pi/nodes/io_manager/tuning.py. The name must be on
@@ -322,7 +345,12 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "args": {"on": "any"},
         "log_level": "WARN",
     },
-    "raw": {"label": "Raw command", "args": {"payload": "any"}},
+    # There is deliberately no `raw` here. It advertised an arbitrary JSON
+    # payload straight at the vessel, which is the one thing this allow-list
+    # exists to prevent, and no node ever had a branch for it - every press acked
+    # "'raw' is not implemented on the vessel". Removed 2026-08-10 along with
+    # `hold` and `resume`, whose modern equivalents are `autopilot_pause` and
+    # `autopilot_resume` above (docs/findings.md).
 }
 
 #: The profiles `run_profile` will accept, mirrored from
@@ -1124,6 +1152,38 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                     {"error": "'id' must be the track id shown on the chart"}
                 ), 400
             cleaned["id"] = int(track)
+
+        if name == "set_speed_limit":
+            # Refused, not clamped, and refused in both places: an operator who
+            # asked for 4 m/s and silently got 2.57 would believe the boat was
+            # doing 4. The upper bound is the vessel limit, so the message names
+            # it rather than just quoting a number.
+            value = cleaned.get("value")
+            if value is None or not math.isfinite(value):
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'value' must be a speed in m/s"}
+                ), 400
+            if not MIN_SPEED_LIMIT_MS <= value <= MAX_SPEED_LIMIT_MS:
+                return jsonify(  # type: ignore[return-value]
+                    {
+                        "error": (
+                            f"'value' must be {MIN_SPEED_LIMIT_MS:g}"
+                            f"..{MAX_SPEED_LIMIT_MS:.2f} m/s - 5 knots is the "
+                            "vessel limit and the dashboard cannot raise it"
+                        )
+                    }
+                ), 400
+
+        if name == "goto":
+            # Grid metres, and the vessel bounds them against its own origin
+            # (guided.py's MAX_RANGE_M). Only the arithmetic is checked here: NaN
+            # would otherwise travel all the way to a MAVLink int32 and land
+            # somewhere real.
+            for key in ("x", "y"):
+                if not math.isfinite(cleaned.get(key, float("nan"))):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": f"'{key}' must be a finite number of grid metres"}
+                    ), 400
 
         if name == "compass_cal":
             # Degrees true, and the vessel wraps rather than refuses - but NaN

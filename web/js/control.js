@@ -83,8 +83,6 @@ async function boot() {
       modeApply: $('mode-apply'),
       speedLimit: $('speed-limit'),
       speedApply: $('speed-apply'),
-      rawPayload: $('raw-payload'),
-      rawSend: $('raw-send'),
       quickCommands: $('quick-commands'),
     },
     store,

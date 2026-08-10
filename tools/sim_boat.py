@@ -199,7 +199,8 @@ class Sim:
         self.vx, self.vy = 0.0, 0.0
         self.set_rad = 0.0
         # `lose_control` sets this, so the OUT_OF_CONTROL status and its red
-        # strobe can be exercised from the dashboard's raw-command box.
+        # strobe can be exercised without a real fault - see `apply()`, and note
+        # the box that used to send it is gone.
         self.lost_until = 0.0
         # Stands in for the flight controller's parameter storage. `set_param`
         # writes here and `telemetry.tuning` reads it back, so the panel's whole
@@ -790,8 +791,16 @@ class Sim:
             self.waypoint_index = 0
             return "acked", "waypoints cleared"
         if name == "set_speed_limit":
-            self.speed_limit = clamp(float(args.get("value", 3.2)), 0.2, 8.0)
-            return "acked", f"speed limit {self.speed_limit:.1f} m/s"
+            # The real vessel refuses anything above 5 knots and says so
+            # (ligmax-pi/nodes/io_manager/guided.py); this only has to not model
+            # a boat that would go faster than one, so it clamps to the same
+            # ceiling. The server refuses out-of-range values before either of us
+            # sees them anyway.
+            self.speed_limit = clamp(float(args.get("value", 2.0)), 0.2, 5.0 * 0.514444)
+            return "acked", (
+                f"speed limit {self.speed_limit:.2f} m/s "
+                f"({self.speed_limit / 0.514444:.2f} kn)"
+            )
         if name == "recentre_origin":
             self.x, self.y = 0.0, 0.0
             return "acked", "grid origin re-zeroed"
@@ -890,11 +899,18 @@ class Sim:
             # Nothing to re-read from - the dict *is* the flight controller here.
             return "acked", f"re-read {len(self.tuning)} parameters"
         if name == "raw":
-            # One hook worth having: `{"lose_control": 20}` fakes losing control
-            # for that many seconds, which is the only way to see the status
-            # indicator go to OUT_OF_CONTROL and the lights go to a red strobe
-            # without arranging a real fault. It cannot be reached by accident -
-            # it needs the raw-command box on /control.
+            # Two debugging hooks, and **no longer reachable from the dashboard**:
+            # `raw` was removed from server.py's COMMAND_SPECS on 2026-08-10 (it
+            # was never implemented on the real vessel, so every press acked
+            # "not implemented"), and /control's raw-command box went with it.
+            # Kept here because these are still the only way to see two states
+            # without arranging a real fault - to use one, put `"raw": {"label":
+            # "Raw command", "args": {"payload": "any"}}` back in COMMAND_SPECS
+            # while you debug, and take it out again.
+            #
+            # `{"lose_control": 20}` fakes losing control for that many seconds,
+            # which is what drives the status indicator to OUT_OF_CONTROL and the
+            # hull lights to a red strobe.
             payload = args.get("payload")
             if isinstance(payload, dict) and "lose_control" in payload:
                 try:

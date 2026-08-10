@@ -11,9 +11,16 @@ import { describeRow, rowToWaypoint, shapeOf } from './plan.js';
 
 const HOLD_MS = 800;
 
+// The speed cap's bounds, mirroring server.py's MIN/MAX_SPEED_LIMIT_MS and
+// ligmax-pi/nodes/io_manager/guided.py. NJORD's 5 knots is the ceiling.
+const MIN_SPEED_MS = 0.2;
+const MAX_SPEED_MS = 5.0 * 0.514444;
+
+// Hold and Resume used to head this list. They were never implemented on the
+// vessel — every press came back "'hold' is not implemented" — and the autopilot
+// panel's Hold station / Carry on (autopilot_pause / autopilot_resume) are the
+// real thing, so they were removed on 2026-08-10 rather than built twice.
 const QUICK_COMMANDS = [
-  { name: 'hold', label: 'Hold', variant: 'outline' },
-  { name: 'resume', label: 'Resume', variant: 'primary' },
   { name: 'arm', label: 'Arm', variant: 'outline', confirm: 'Arm propulsion?' },
   { name: 'disarm', label: 'Disarm', variant: 'outline' },
   { name: 'estop_clear', label: 'Clear E-stop', variant: 'outline', confirm: 'Clear the emergency stop? Propulsion power will be restored.' },
@@ -52,7 +59,6 @@ export class CommandPanel {
     this._bindSpeed();
     this._bindGoto();
     this._bindMission();
-    this._bindRaw();
     if (!canSend) this._lockDown();
   }
 
@@ -151,11 +157,28 @@ export class CommandPanel {
     });
   }
 
+  /**
+   * The go-to / AUTO speed cap, in m/s.
+   *
+   * Bounded here, on the server and on the vessel by the same pair of numbers —
+   * 0.2 m/s to the 5 kn vessel limit — and refused rather than clamped at every
+   * one of the three, because a cap that silently becomes a different cap is
+   * worse than a rejected one. This is not the autopilot's careful-mode ceiling;
+   * that is on the autonomy panel and this button does not touch it.
+   */
   _bindSpeed() {
     this.elements.speedApply?.addEventListener('click', () => {
       const value = Number.parseFloat(this.elements.speedLimit.value);
       if (!Number.isFinite(value)) {
-        this.notify('Speed limit must be a number.', 'warn');
+        this.notify('Speed limit must be a number of m/s.', 'warn');
+        return;
+      }
+      if (value < MIN_SPEED_MS || value > MAX_SPEED_MS) {
+        this.notify(
+          `Speed limit must be ${MIN_SPEED_MS} – ${MAX_SPEED_MS.toFixed(2)} m/s ` +
+            '(5 knots is the vessel limit).',
+          'warn'
+        );
         return;
       }
       this._send('set_speed_limit', { value });
@@ -280,21 +303,6 @@ export class CommandPanel {
       this.onMissionClear?.();
       this.setMissionArmed(false);
     }
-  }
-
-  _bindRaw() {
-    this.elements.rawSend?.addEventListener('click', () => {
-      const text = this.elements.rawPayload.value.trim();
-      if (!text) return;
-      let payload;
-      try {
-        payload = JSON.parse(text);
-      } catch (error) {
-        this.notify(`Raw payload is not valid JSON: ${error.message}`, 'error');
-        return;
-      }
-      this._send('raw', { payload });
-    });
   }
 
   /** Keep the mode dropdown in step with what the vessel says it supports.

@@ -134,6 +134,20 @@ const FIELDS = {
   'lights.override': { label: 'Custom pattern on', kind: 'bool', goodWhen: false },
   'lights.pattern_frames': { label: 'Pattern frames', digits: 0 },
 
+  // The hand-flown route: the cap a `goto` and an AUTO mission run at, and where
+  // the last go-to was sent. Not the autonomy node's ceiling — that is
+  // `autopilot.commander.speed_ceiling_kn` on the autopilot panel, and the two
+  // are different numbers on purpose (ligmax-pi/nodes/io_manager/guided.py).
+  // `speed_limit_sent` false means the figure beside it is the vessel's default
+  // and the autopilot was never told, so an AUTO mission will run at whatever
+  // WP_SPEED holds; `speed_limit_refused` appears only when the flight controller
+  // turned DO_CHANGE_SPEED down, which is the case where the cap shown is a lie.
+  'control.speed_limit_ms': { label: 'Go-to / AUTO speed cap', unit: 'm/s', digits: 2 },
+  'control.speed_limit_kn': { label: 'Cap in knots', unit: 'kn', digits: 2 },
+  'control.speed_limit_sent': { label: 'Cap sent to autopilot', kind: 'bool', goodWhen: true },
+  'control.speed_limit_refused': { label: 'Cap refused by autopilot', kind: 'text' },
+  'control.goto_target': { label: 'Last go-to', kind: 'text' },
+
   'autonomy.planner': { label: 'Planner', kind: 'text' },
   'autonomy.replans': { label: 'Replans', digits: 0 },
   'autonomy.waypoint': { label: 'Waypoint', digits: 0 },
