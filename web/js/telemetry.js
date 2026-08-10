@@ -190,7 +190,11 @@ const GROUPS = [
 // Telemetry blocks that already have a panel of their own, so the generic
 // renderer must not draw them a second time. `tuning` is a form, not a set of
 // readings: seventeen numbers with an editable field each (web/js/tuning.js).
-const OWNED_ELSEWHERE = new Set(['tuning']);
+// `preflight` is worse than redundant here - rendered generically it reads
+// "Safety switch: on", and whether that word was observed or is a default lives
+// in a sibling field the generic renderer shows as an unrelated row
+// (web/js/preflight.js).
+const OWNED_ELSEWHERE = new Set(['tuning', 'preflight']);
 
 const SPARK_INTERVAL = 450; // ms; text updates every frame, charts less often
 

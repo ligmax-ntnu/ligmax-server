@@ -2254,14 +2254,102 @@
    where the operator's hands already are; the course editor is a worktable and
    takes the full width, like the tuning bench. */
 .control-grid > .card--autopilot { grid-column: 1; }
+.control-grid > .card--preflight { grid-column: 1; }
 .control-grid > .card--course { grid-column: 1 / -1; }
 
 @media (max-width: 1150px) {
   .control-grid > .card--autopilot,
+  .control-grid > .card--preflight,
   .control-grid > .card--course {
     grid-column: 1;
     grid-row: auto;
   }
+}
+
+/* --- flight controller: safety switch & compass ------------------------ */
+
+.pf {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+/* The safety switch state, and the reason this card is styled at all: three
+   states that must never be mistaken for each other at a glance on a dock, in
+   sunlight, from a metre away. Live outputs read as danger, inhibited as ok, and
+   "nobody knows" gets the warn colour rather than the calm one — an unread
+   switch is treated as live until proven otherwise. */
+.pf-state {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--muted);
+  border-radius: var(--radius-xs);
+  background: var(--bg-sunk);
+}
+
+.pf-state[data-state='off'] {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pf-state[data-state='on'] {
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.pf-state[data-state='unknown'] {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.pf-state-word {
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.pf-state-note {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.pf-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+}
+
+.pf-heading {
+  margin: 0.5rem 0 0;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pf-hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+}
+
+.pf-compare,
+.pf-last {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.pf button:disabled,
+.pf input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Below this the six-column waypoint row stops fitting, so it reflows into two

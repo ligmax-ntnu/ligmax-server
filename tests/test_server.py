@@ -132,6 +132,39 @@ def test_command_specs():
     r = client.post("/api/command", json={"name": "set_ride_height", "args": {}})
     check(r.status_code == 400, "set_ride_height without a pwm is refused")
 
+    # The Pixhawk's safety switch. Two commands rather than one carrying a
+    # boolean, because "safety on" INHIBITS the outputs and "safety off" makes
+    # them live - an audit line reading `set_safety enabled=false` is read wrong
+    # by exactly the person reading it in a hurry.
+    for name in ("safety_on", "safety_off"):
+        r = client.post("/api/command", json={"name": name, "args": {}})
+        check(r.status_code == 200, f"{name} needs no args ({r.status_code})")
+    check(
+        COMMAND_SPECS["safety_off"].get("danger") is True,
+        "safety_off is the danger one: it is the only command here that makes "
+        "the thrusters capable of turning with no other action",
+    )
+    check(
+        not COMMAND_SPECS["safety_on"].get("danger"),
+        "safety_on is the safe direction and must not shout like an E-stop",
+    )
+
+    # The compass swing. Degrees true; the value is wrapped rather than refused,
+    # because 361 is a typo with an obvious reading, but NaN and inf are not
+    # headings at all and reach ArduPilot's magnetic model as numbers it has no
+    # answer for.
+    r = client.post("/api/command", json={"name": "compass_cal", "args": {"heading": 137.5}})
+    check(r.status_code == 200, f"compass_cal takes a heading ({r.status_code})")
+    r = client.post("/api/command", json={"name": "compass_cal", "args": {}})
+    check(r.status_code == 400, "compass_cal without a heading is refused")
+    for bad in (float("nan"), float("inf")):
+        r = client.post("/api/command", json={"name": "compass_cal", "args": {"heading": bad}})
+        check(r.status_code == 400, f"compass_cal refuses heading={bad!r} ({r.status_code})")
+    r = client.post("/api/command", json={"name": "compass_cal", "args": {"heading": "north"}})
+    check(r.status_code == 400, "compass_cal refuses a non-numeric heading")
+    r = client.post("/api/command", json={"name": "compass_cal", "args": {"heading": 451.5}})
+    check(r.status_code == 200, "a heading past 360 is wrapped, not refused")
+
     # Still an allow-list. This is the property that makes a stray fetch() from a
     # browser console unable to invent vessel behaviour.
     r = client.post("/api/command", json={"name": "careful_maybe", "args": {}})

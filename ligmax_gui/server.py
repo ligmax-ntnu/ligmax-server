@@ -160,6 +160,47 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "confirm": True,
         "log_level": "WARN",
     },
+    # The Pixhawk's own safety switch - the button on the hull - pressed from
+    # the dashboard. ArduPilot forces the board's safety state directly for this
+    # command, so it does what holding the button does and is not gated by
+    # BRD_SAFETYOPTION the way the physical press is.
+    #
+    # Two commands rather than one carrying a boolean, and here the reason is the
+    # words rather than the mechanism: safety ON *inhibits* the motor outputs and
+    # safety OFF makes them live, which is the opposite of what both phrases
+    # sound like. An audit line reading `set_safety enabled=false` would be read
+    # wrong by exactly the person reading it in a hurry; `safety_off` with the
+    # label below cannot be.
+    #
+    # `safety_off` is the only command on this list that makes the thrusters
+    # capable of turning without any other action, which is what `danger` is for.
+    "safety_off": {
+        "label": "Safety switch OFF — motor outputs live",
+        "args": {},
+        "confirm": True,
+        "danger": True,
+    },
+    "safety_on": {
+        "label": "Safety switch ON — motor outputs inhibited",
+        "args": {},
+        "log_level": "WARN",
+    },
+    # ArduPilot's large-vehicle mag cal: point the hull along a heading known
+    # from something that is not the compass, send that heading, and the
+    # autopilot rewrites the compass offsets against the world magnetic model
+    # for where it is standing. The tumble calibration wants the vehicle rotated
+    # through all three axes, which a boat in the water cannot do.
+    #
+    # Confirms and logs at WARN because it overwrites stored calibration on the
+    # flight controller: a bad swing survives every reboot in the chain and
+    # shows up later as a boat that will not hold a heading, by which time
+    # nobody remembers pressing this.
+    "compass_cal": {
+        "label": "Calibrate compass from a known heading",
+        "args": {"heading": "float"},
+        "confirm": True,
+        "log_level": "WARN",
+    },
     # Re-read the whole tuning table off the autopilot. The vessel does this on
     # every connect and once a minute anyway; this is the button for after someone
     # has been editing parameters in Mission Planner.
@@ -256,8 +297,39 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # dropped command.
     "careful_on": {"label": "Careful mode (1 kn)", "args": {}, "log_level": "WARN"},
     "careful_off": {"label": "Normal speed", "args": {}, "log_level": "WARN"},
+    # The run profile, which is careful mode generalised - see
+    # ligmax-pi/nodes/self_driving/profiles.py. NJORD gives two attempts at each
+    # subtask and the marks do not move between them, so the attempts are
+    # different problems: `survey` is a 1 kn pass whose product is the map, `fast`
+    # drives off that map at up to the 5 kn vessel limit. `survey` and
+    # `careful_on` are the same state under two names, and the pair above is kept
+    # because the older dashboard build sends it.
+    #
+    # The name is validated below rather than only at the vessel: a typo at 09:00
+    # should come back on the console immediately, not sit at "sent" and return
+    # "failed" a second later while somebody wonders which of the two they mistyped.
+    "run_profile": {
+        "label": "Run profile",
+        "args": {"profile": "str"},
+        "log_level": "WARN",
+    },
+    # The cardinal alternation prior. Off by default and deliberately so - it is
+    # an inference from how marks are laid, not a measurement, and switching it on
+    # is a decision somebody makes knowing that. WARN because "why did it pick
+    # that side" has to be answerable from the log afterwards.
+    "alternation": {
+        "label": "Cardinal alternation prior",
+        "args": {"on": "any"},
+        "log_level": "WARN",
+    },
     "raw": {"label": "Raw command", "args": {"payload": "any"}},
 }
+
+#: The profiles `run_profile` will accept, mirrored from
+#: ligmax-pi/nodes/self_driving/profiles.py. Mirrored rather than imported for the
+#: same reason `tuning.py` mirrors the vessel's parameter table: this process does
+#: not import the boat's code and must not start.
+RUN_PROFILES = ("survey", "normal", "fast")
 
 _FAILED_ATTEMPT_LIMIT = 8
 _FAILED_ATTEMPT_WINDOW = 300.0
@@ -967,6 +1039,22 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                     {"error": f"mode '{cleaned['mode']}' not offered by the vessel"}
                 ), 400
 
+        if name == "run_profile":
+            wanted = str(cleaned.get("profile", "")).strip().lower()
+            if wanted not in RUN_PROFILES:
+                return jsonify(  # type: ignore[return-value]
+                    {
+                        "error": (
+                            f"'{wanted}' is not a run profile - "
+                            f"pick one of {', '.join(RUN_PROFILES)}"
+                        )
+                    }
+                ), 400
+            cleaned["profile"] = wanted
+
+        if name == "alternation":
+            cleaned["on"] = bool(cleaned.get("on"))
+
         if name == "set_param":
             # The whitelist and the ranges live in `tuning.py`, mirrored from the
             # vessel's own copy. Refusing here means the operator gets the reason
@@ -1036,6 +1124,19 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                     {"error": "'id' must be the track id shown on the chart"}
                 ), 400
             cleaned["id"] = int(track)
+
+        if name == "compass_cal":
+            # Degrees true, and the vessel wraps rather than refuses - but NaN
+            # and inf are not headings at all, and a float32 param carrying one
+            # reaches ArduPilot's magnetic model as a number it has no answer
+            # for. Refused here so the operator reads why immediately instead of
+            # watching the row sit at "sent".
+            heading = cleaned.get("heading")
+            if heading is None or not math.isfinite(heading):
+                return jsonify(  # type: ignore[return-value]
+                    {"error": "'heading' must be the vessel's true heading in degrees"}
+                ), 400
+            cleaned["heading"] = heading % 360.0
 
         if name == "set_lights_pattern":
             # lights_effects.validate_frames() mirrors

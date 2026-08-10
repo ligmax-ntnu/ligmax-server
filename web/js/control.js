@@ -20,6 +20,7 @@ import { AutopilotPanel, CoursePlanner } from './autopilot.js';
 import { CommandPanel, renderCommandHistory } from './commands.js';
 import { DeployPanel } from './deploy.js';
 import { LogConsole, downloadText } from './logs.js';
+import { PreflightPanel } from './preflight.js';
 import {
   $,
   bootShell,
@@ -117,6 +118,16 @@ async function boot() {
     { notify, canSend: admin }
   );
 
+  /* --- flight controller -------------------------------------------- */
+
+  // Rendered for everyone and gated on `canSend`, like the panels above: where
+  // the safety switch is - or that nobody knows - is something a read-only
+  // viewer standing next to the boat needs to be able to read.
+  const preflightPanel = new PreflightPanel($('preflight-panel'), store, {
+    notify,
+    canSend: admin,
+  });
+
   /* --- stabilisation tuning ----------------------------------------- */
 
   // Rendered for everyone: what the boat is tuned to is a measurement, and a
@@ -166,6 +177,7 @@ async function boot() {
     telemetryPanels.update();
     commandPanel.syncModes();
     autopilotPanel.update();
+    preflightPanel.update();
     tuningPanel.update();
     updateHeader(store);
   });
@@ -202,6 +214,7 @@ async function boot() {
     tuningPanel,
     autopilotPanel,
     coursePlanner,
+    preflightPanel,
   };
 
   startHeartbeat(store, () => kpiStrip.update());

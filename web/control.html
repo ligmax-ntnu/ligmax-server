@@ -133,6 +133,22 @@
             <div id="autopilot-panel"></div>
           </section>
 
+          <!-- --------------------------------------- flight controller -->
+          <!-- The Pixhawk's own two switches, both dockside actions: the safety
+               button, and the compass calibration. Neither is used under way and
+               neither belongs with the driving controls above — but the safety
+               switch has to be readable from the same screen the E-stop is on,
+               because the two are confusable and are not the same thing. -->
+          <section class="card card--preflight" id="preflight-card">
+            <header class="card-head card-head--tight">
+              <div>
+                <span class="eyebrow">Flight controller</span>
+                <h2 class="card-title">Safety switch &amp; compass</h2>
+              </div>
+            </header>
+            <div id="preflight-panel"></div>
+          </section>
+
           <!-- ------------------------------------------------ telemetry -->
           <div class="control-telemetry" id="telemetry-panels"></div>
 

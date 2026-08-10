@@ -182,6 +182,74 @@ export class AutopilotPanel {
     this._speed.append(this._speedText, this._careful);
     root.append(this._speed);
 
+    // -- the run profile ---------------------------------------------------
+    //
+    // NJORD gives two attempts at each subtask and the marks do not move between
+    // them, so the attempts are different problems: the first is slow and its
+    // product is the surveyed map, the second is driven off that map at up to the
+    // 5 kn limit. Selecting which one this is has to be one press on a phone on a
+    // pontoon, so it is three chips showing the boat's own answer rather than a
+    // dropdown showing what was last sent.
+    //
+    // `survey` and the Careful mode toggle above are the same state; the toggle
+    // stays because it is what everyone's thumb already knows, and both are
+    // rendered from `commander.profile` so they can never disagree.
+    this._profiles = el('div', 'ap-speed');
+    this._profileChips = new Map();
+    for (const [name, label, hint] of [
+      [
+        'survey',
+        'Survey (1 kn)',
+        'Attempt one. 1 knot, slow enough that every mark gets the dozen sweeps ' +
+          'it needs to be established and the camera gets its four agreeing ' +
+          'frames on each cardinal. The map this run builds is what attempt two ' +
+          'is driven off.',
+      ],
+      [
+        'normal',
+        'Normal',
+        'The tuned defaults, 3.1 kn. What the boat runs when nobody has said ' +
+          'otherwise, and what it comes back up in after a reboot.',
+      ],
+      [
+        'fast',
+        'Fast (up to 5 kn)',
+        'Attempt two, off the surveyed map. Up to the 5 knot vessel limit where ' +
+          'the course allows it, paced down for corners, and giving every mark a ' +
+          'wider berth because clearance is a time budget and speed spends it. ' +
+          'Only sensible once a survey exists.',
+      ],
+    ]) {
+      const chip = el('button', 'chip chip--toggle', label);
+      chip.type = 'button';
+      chip.title = hint;
+      chip.disabled = !this.canSend;
+      chip.addEventListener('click', () => this.send('run_profile', { profile: name }));
+      this._profileChips.set(name, chip);
+      this._profiles.append(chip);
+    }
+
+    // The cardinal alternation prior. Off by default, and the label says which
+    // way round it is rather than only lighting up, because a switched-on
+    // inference the operator has forgotten about is the one thing here that could
+    // put the boat on the wrong side of a mark.
+    this._alternation = el('button', 'chip chip--toggle', 'Alternation prior: off');
+    this._alternation.type = 'button';
+    this._alternation.disabled = !this.canSend;
+    this._alternation.title =
+      'When the camera never commits to which cardinal a mark is, pass it on the ' +
+      'opposite side to the mark before it - marks in a channel alternate, so two ' +
+      'of the same hand in a row would constrain nothing. It is a guess, it never ' +
+      'overrides a committed camera vote, and it says on this panel what it ' +
+      'concluded and why. Switch it on only if the survey shows the cardinals ' +
+      'never resolved.';
+    this._alternation.addEventListener('click', () => {
+      const on = Boolean(this.block?.commander?.alternation);
+      this.send('alternation', { on: !on });
+    });
+    this._profiles.append(this._alternation);
+    root.append(this._profiles);
+
     // -- progress ---------------------------------------------------------
     this._progress = el('div', 'ap-progress');
     this._progressBar = el('div', 'ap-bar');
@@ -338,11 +406,30 @@ export class AutopilotPanel {
       this._speedText.textContent = Number.isFinite(ceiling)
         ? `Held to ${ceiling.toFixed(1)} kn`
         : 'Held to 1 kn';
+    } else if (Number.isFinite(ceiling) && Number.isFinite(limit) && ceiling >= limit) {
+      // The fast profile spends the boat's whole margin, so the ceiling and the
+      // vessel limit are the same number. Saying "Limit 5.0 kn" there would read
+      // as the ordinary state; it is not, and it should look like it is not.
+      this._speedText.textContent = `Running to the ${limit.toFixed(1)} kn limit`;
     } else if (Number.isFinite(limit)) {
       this._speedText.textContent = `Limit ${limit.toFixed(1)} kn`;
     } else {
       this._speedText.textContent = '';
     }
+
+    // The profile chips and the prior, both from what the boat reports.
+    const profile = typeof commander.profile === 'string' ? commander.profile : null;
+    for (const [name, chip] of this._profileChips) {
+      const on = profile === name;
+      chip.classList.toggle('is-on', on);
+      chip.setAttribute('aria-pressed', String(on));
+    }
+    const alternation = Boolean(commander.alternation);
+    this._alternation.classList.toggle('is-on', alternation);
+    this._alternation.setAttribute('aria-pressed', String(alternation));
+    this._alternation.textContent = alternation
+      ? 'Alternation prior: ON'
+      : 'Alternation prior: off';
   }
 
   _updateProgress(block) {
