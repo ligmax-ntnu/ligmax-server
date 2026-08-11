@@ -17,6 +17,12 @@ Transports
     browser -> server GET  /api/camera/0.jpg            (read gate)
                       POST /api/camera/config           (admin cookie required)
 
+    browser -> server POST /api/camera/capture          (admin cookie required)
+    jetson -> server  POST /api/camera/capture/upload   (boat key; full-res JPEG)
+    browser -> server GET  /api/camera/captures         (read gate)
+                      GET  /api/camera/captures/<name>  (read gate)
+                      DELETE /api/camera/captures/<name> (admin cookie required)
+
     boat  -> server   POST /api/trip/<name>             (boat key; gzip body)
                       GET  /api/trip                    (boat key or read gate)
     browser -> server GET  /api/trip/<boat>/<name>      (read gate; downloads)
@@ -49,7 +55,7 @@ from flask import (
     url_for,
 )
 
-from . import auth, lights_effects, plan as planning, protocol, trips, tuning
+from . import auth, lights_effects, plan as planning, protocol, stills, trips, tuning
 from .camera import MAX_FRAME_BYTES as MAX_CAMERA_BYTES, CameraRelay
 from .config import Config, REPO_ROOT, WEB_ROOT, load_config
 from .deploy import COMMANDED, DeployRegistry
@@ -432,6 +438,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     app.config["LIGMAX_DEPLOY"] = deployments
     cameras = CameraRelay()
     app.config["LIGMAX_CAMERA"] = cameras
+    captures = stills.StillStore(config.stills_store)
+    app.config["LIGMAX_STILLS"] = captures
+    if captures.last_error:
+        config.warnings.append(f"full-res stills unavailable: {captures.last_error}")
     recordings = trips.TripStore(config.trip_store)
     app.config["LIGMAX_TRIPS"] = recordings
     if recordings.last_error:
@@ -623,6 +633,89 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     # uplink with the telemetry and the command channel, and video is the only
     # payload here big enough to crowd them out. See camera.py.
 
+    def _vessel_state_for(captured_at: Any) -> dict[str, Any]:
+        """Where the boat was and how it was lying, to file with a still.
+
+        **This is the nearest telemetry, not synchronised telemetry**, and the
+        difference is recorded rather than glossed over. A still climbs a 4G
+        uplink for seconds, so the frame that is current when it lands is not the
+        frame that was current when the shutter opened; `vessel_age_s` is that
+        gap, computed against the Jetson's own capture time.
+
+        And that gap is measured across two clocks. The Jetson has no
+        battery-backed RTC (`ligmax-edge/estimate.py CaptureClock`) and NTP's
+        first correction after boot is a hard step, so `vessel_age_s` can be
+        minutes when nothing is wrong with either machine. `boat_clock_offset` is
+        shipped beside it - that is the Pi's own offset from this server - so a
+        reader has both halves of the comparison instead of one number to
+        misplace confidence in.
+
+        Why bother at all, given the camera is calibrated: a Kannala-Brandt fit
+        is *intrinsics*. It says what the lens does with a ray and nothing about
+        where the lens points, so it cannot turn a marker's camera-frame pose
+        into a berth position - that needs the mount geometry AND which way is
+        down. Roll matters at the scale that decides this task: cross-track error
+        is `range * sin(roll)`, which at 4 m and 5 degrees is 0.35 m inside a 2 m
+        berth. And a fix type is what makes the pictures *checkable* rather than
+        merely viewable: photograph a tag, move a measured distance on RTK,
+        photograph it again, and the computed ranges have to differ by what the
+        baseline says.
+        """
+        snapshot = store.snapshot()
+        state = snapshot.get("state") or {}
+        telemetry = state.get("telemetry") or {}
+        boat = state.get("boat") or {}
+        stats = snapshot.get("stats") or {}
+
+        out: dict[str, Any] = {}
+        vessel: dict[str, Any] = {}
+        for key in ("attitude", "motion", "gps"):
+            block = telemetry.get(key)
+            if isinstance(block, dict) and block:
+                vessel[key] = dict(block)
+        for key in ("position", "heading", "velocity"):
+            if key in boat:
+                vessel[key] = boat[key]
+        if state.get("origin"):
+            # The grid origin, without which `position` is metres from nowhere.
+            vessel["origin"] = state["origin"]
+        if state.get("status"):
+            vessel["status"] = state["status"]
+        if not vessel:
+            return {"vessel": None, "vessel_why": "no telemetry from the vessel"}
+
+        out["vessel"] = vessel
+        last_frame = stats.get("last_frame_at")
+        out["vessel_at"] = last_frame
+        out["boat_clock_offset"] = stats.get("boat_clock_offset")
+        try:
+            if last_frame is not None and captured_at is not None:
+                out["vessel_age_s"] = round(float(last_frame) - float(captured_at), 2)
+        except (TypeError, ValueError):
+            pass
+        if not telemetry.get("attitude"):
+            # Said in the record rather than left as a missing key, because the
+            # absence is a fact about the vessel's software and not about this
+            # still: nothing published roll or pitch before 2026-08-11
+            # (ligmax-pi/nodes/io_manager/navigation.py), so a set of pictures
+            # with no attitude was taken by a boat that could not report it.
+            out["vessel_why"] = "the vessel published no attitude block"
+        return out
+
+    def _camera_poll() -> dict[str, Any]:
+        """The stream config plus any outstanding full-res capture.
+
+        One helper because it rides on THREE replies - the config poll and both
+        exits from the frame POST - and a capture that only reached one of them
+        would work when video was on and appear broken when it was off, which is
+        exactly backwards: the capture button is most useful with the stream off.
+
+        `captures.pending()` is what expires a stale request and clears a
+        completed one, so calling it on every poll is the point rather than a
+        side effect to be avoided.
+        """
+        return {**cameras.poll(), "capture": captures.pending()}
+
     @app.post("/api/camera")
     def camera_ingest() -> Response:
         if not boat_authorised():
@@ -633,7 +726,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         # Nothing is stored while the stream is off, so a sender that ignores the
         # config cannot keep the panel alive - and the reply tells it to stop.
         if not cameras.enabled:
-            return jsonify({"ok": False, "enabled": False, **cameras.poll()})  # type: ignore[return-value]
+            return jsonify({"ok": False, "enabled": False, **_camera_poll()})  # type: ignore[return-value]
 
         body = request.get_data(cache=False)
         if len(body) > MAX_CAMERA_BYTES:
@@ -662,7 +755,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             return jsonify({"error": why}), 400  # type: ignore[return-value]
         # The config rides back on every frame, so a change to fps or width takes
         # effect on the next frame instead of the next poll.
-        return jsonify({"ok": True, **cameras.poll()})
+        return jsonify({"ok": True, **_camera_poll()})
 
     @app.get("/api/camera/config")
     def camera_config() -> Response:
@@ -673,7 +766,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             # a Jetson that has "never asked" while it is asking every 5 s.
             cameras.note_refused("config poll, wrong or missing boat key")
             return jsonify({"error": "boat key required"}), 403  # type: ignore[return-value]
-        response = jsonify(cameras.poll())
+        response = jsonify(_camera_poll())
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -714,6 +807,181 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Frame-Age"] = f"{frame.age():.2f}"
         response.headers["X-Frame-Seq"] = str(frame.seq)
+        return response
+
+    # -- full-resolution stills ---------------------------------------------
+    #
+    # The whole 2592x1944 sensor frame, both cameras, one press: what the AR-tag
+    # work needs and what the live view cannot give, since that is a 480 px crop
+    # of a 2:1 band aimed off the bow. Requested here, collected by the Jetson on
+    # the config poll it already makes, written to disk. See `stills.py` - the
+    # ordering, the sizes and the "why not a command" are all there.
+    #
+    # Reading is behind the read gate, like trip recordings: a photograph of the
+    # dock is evidence, and the people who want it in the tent are the ones
+    # without the key. Asking for one is admin, because it costs 4G uplink.
+
+    @app.post("/api/camera/capture")
+    def camera_capture() -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        payload = request.get_json(silent=True) or {}
+        pending = captures.request(
+            cameras=payload.get("cameras"),
+            quality=payload.get("quality"),
+            note=payload.get("note") or "",
+            by=_client_ip(),
+        )
+        store.add_log(
+            "INFO",
+            f"full-res capture #{pending['id']} requested for "
+            f"cam{'/cam'.join(pending['cameras'])} at q{pending['quality']}"
+            + (f" - {pending['note']}" if pending["note"] else "")
+            + f" [{_client_ip()}]",
+            "gui.camera",
+        )
+        return jsonify({"ok": True, **captures.state()})
+
+    @app.delete("/api/camera/capture")
+    def camera_capture_cancel() -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        captures.cancel()
+        return jsonify({"ok": True, **captures.state()})
+
+    @app.post("/api/camera/capture/upload")
+    def camera_capture_upload() -> Response:
+        """The Jetson handing back one full-res frame. Boat key, JPEG body.
+
+        Deliberately NOT gated on `cameras.enabled`: a capture is a separate,
+        deliberate action from the live stream, and the case it exists for -
+        going to the dock to photograph the AR tags - is one where nobody wants
+        video running at all.
+        """
+        if not boat_authorised():
+            store.note_rejected()
+            cameras.note_refused("capture upload, wrong or missing boat key")
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+
+        body = request.get_data(cache=False)
+        if len(body) > stills.MAX_STILL_BYTES:
+            store.note_rejected()
+            return jsonify({"error": "still too large"}), 413  # type: ignore[return-value]
+
+        meta: dict[str, Any] = {}
+        # Everything the vessel chooses to say about how the picture was made.
+        # `width`/`height` and the sensor mode matter because a calibration does
+        # not transfer across modes; `rotated_180` matters because a calibration
+        # is only valid for the orientation it was captured in, and a mismatch
+        # fails silently (see sender.py's own warning about it).
+        for key in (
+            "t", "width", "height", "label", "mode", "rotated_180", "calib",
+            "wb", "saturation", "exposure_ms", "gain", "quality", "seq",
+        ):
+            if (value := request.args.get(key)) is not None:
+                meta[key] = value
+        for key in ("width", "height", "mode", "seq", "quality"):
+            if key in meta:
+                try:
+                    meta[key] = int(float(meta[key]))
+                except (TypeError, ValueError):
+                    meta.pop(key)
+        for key in ("t", "saturation", "exposure_ms", "gain"):
+            if key in meta:
+                try:
+                    meta[key] = float(meta[key])
+                except (TypeError, ValueError):
+                    meta.pop(key)
+        if "rotated_180" in meta:
+            meta["rotated_180"] = str(meta["rotated_180"]).lower() in (
+                "1", "true", "yes", "on"
+            )
+
+        # What the vessel was doing. Merged in HERE rather than sent by the
+        # Jetson, because the Jetson does not know: attitude and position come
+        # off the Pixhawk to the Pi and reach shore on the telemetry link, while
+        # the picture comes off the Jetson on this one. This server is the first
+        # place the two meet, which makes it the only place that can staple them
+        # together - see `_vessel_state_for` above for what is and is not honest
+        # about doing that.
+        meta.update(_vessel_state_for(meta.get("t")))
+
+        info, why = captures.accept(
+            request.args.get("cam", "0"),
+            request.args.get("id"),
+            body,
+            meta,
+        )
+        if why is not None:
+            store.add_log("WARN", f"full-res still rejected: {why}", "gui.camera")
+            return jsonify({"error": why}), 400  # type: ignore[return-value]
+        store.add_log(
+            "INFO",
+            f"full-res still {info['name']} stored "
+            f"({info['bytes'] / 1048576.0:.2f} MB"
+            + (
+                f", {info.get('width')}x{info.get('height')}"
+                if info.get("width")
+                else ""
+            )
+            + ")",
+            "gui.camera",
+        )
+        # The state rides back so the Jetson can see it landed, and so a second
+        # camera's upload learns the request is now complete.
+        return jsonify({"ok": True, "still": info, "capture": captures.pending()})
+
+    @app.get("/api/camera/captures")
+    def camera_captures() -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        response = jsonify({**captures.state(), "admin": is_admin()})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/camera/captures/<name>")
+    def camera_capture_file(name: str) -> Response:
+        if not may_read():
+            return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
+        path = captures.path_for(name)
+        if path is None:
+            return jsonify({"error": "no such still"}), 404  # type: ignore[return-value]
+        # Inline rather than an attachment: the gallery shows these in an <img>,
+        # and a browser that downloads instead of rendering makes reviewing forty
+        # frames from the dock forty saves. `?download=1` is the other case.
+        response = make_response(
+            send_from_directory(
+                path.parent,
+                path.name,
+                mimetype="image/jpeg",
+                as_attachment=bool(request.args.get("download")),
+            )
+        )
+        # These never change once written, so let a browser keep them - a gallery
+        # of 2 MB JPEGs re-fetched on every render is the one way this panel
+        # could cost more than the uplink did.
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        return response
+
+    @app.delete("/api/camera/captures/<name>")
+    def camera_capture_delete(name: str) -> Response:
+        if not is_admin():
+            return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
+        ok, why = captures.delete(name)
+        if not ok:
+            return jsonify({"error": why}), 404  # type: ignore[return-value]
+        store.add_log("WARN", f"still {name} deleted [{_client_ip()}]", "gui.camera")
+        return jsonify({"ok": True, **captures.state()})
+
+    @app.get("/captures")
+    def captures_page() -> Response:
+        """The gallery. Standalone, like `/led_control` and `/debug/lidar_viz`."""
+        if (response := consume_key_param(url_for("captures_page"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "captures.html"))
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     # -- trip recordings ----------------------------------------------------

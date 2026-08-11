@@ -18,12 +18,34 @@
  * MJPEG connection held open through Cloudflare and Caddy is one more thing to
  * go wrong, and at the 1-4 fps this link can afford there is nothing to gain.
  * Each load is preloaded and swapped in, so a slow frame never blanks the tile.
+ *
+ * Two more controls live here and neither is about the stream:
+ *
+ *   the detector switch  POST /api/camera/config {detect}. Admin only. Turns the
+ *                        YOLO inference on the Jetson off and on WITHOUT
+ *                        restarting capture — which matters, because tearing the
+ *                        pipeline down is what latches Argus into the state only
+ *                        a power cycle clears (ligmax-edge/run.sh).
+ *   capture full-res     POST /api/camera/capture. One whole 2592x1944 frame per
+ *                        camera, saved on the ground station rather than shown
+ *                        here. It takes seconds, not milliseconds — the request
+ *                        is collected on a poll and the frames are megabytes —
+ *                        so the status line below counts them in.
+ *
+ * Both exist because `sender.py` owns both CSI sensors and nothing else on that
+ * board can open them, so "use the cameras as cameras" has to be a mode of the
+ * detector process. The gallery is `/captures`; this panel is the shutter.
  */
 
 import * as fmt from './format.js';
 
 const STATE_POLL_ON_MS = 1000;
 const STATE_POLL_OFF_MS = 5000;
+
+// While a capture is outstanding, look often enough that the button stops saying
+// "waiting" within a second of the frames landing. The Jetson's own poll is 5 s,
+// so this is not the thing setting the latency.
+const CAPTURE_POLL_MS = 1500;
 
 // Never ask for frames faster than the vessel is sending them, whatever the
 // config says: a 404 storm against a stopped sender is pure waste.
@@ -33,6 +55,24 @@ export async function fetchCameraState() {
   const response = await fetch('/api/camera/state', { credentials: 'same-origin' });
   if (!response.ok) throw new Error(`camera state failed: ${response.status}`);
   return response.json();
+}
+
+export async function fetchCaptureState() {
+  const response = await fetch('/api/camera/captures', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`capture state failed: ${response.status}`);
+  return response.json();
+}
+
+export async function requestCapture(body = {}) {
+  const response = await fetch('/api/camera/capture', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `capture failed (${response.status})`);
+  return payload;
 }
 
 export async function setCameraConfig(changes) {
@@ -135,8 +175,9 @@ class CameraTile {
 
 export class CameraPanel {
   /**
-   * @param {object} nodes  `{card, grid, status, toggle, viewerToggle, quality}`
-   *   — every one optional, so a page can carry a cut-down version.
+   * @param {object} nodes  `{card, grid, status, toggle, viewerToggle, quality,
+   *   detect, capture, captureStatus}` — every one optional, so a page can carry
+   *   a cut-down version.
    * @param {object} options `{admin, notify, prefs, savePrefs}`
    */
   constructor(nodes, { admin = false, notify = () => {}, prefs = {}, savePrefs = () => {} } = {}) {
@@ -148,7 +189,9 @@ export class CameraPanel {
 
     this.tiles = new Map();
     this.state = null;
+    this.captures = null;
     this.stateTimer = null;
+    this.captureTimer = null;
     this.frameTimer = null;
     // The viewer's own download switch. Defaults to showing frames *if* the
     // vessel is sending them — the expensive default (making the boat send) is
@@ -199,6 +242,73 @@ export class CameraPanel {
       });
     }
 
+    const { detect, capture } = this.nodes;
+
+    if (detect) {
+      detect.disabled = !this.admin;
+      detect.title = this.admin
+        ? 'Stop or start the YOLO detector on the Jetson. Capture, previews and the '
+          + 'lidar keep running either way — only the inference stops, and no restart '
+          + 'of the camera pipeline is involved.'
+        : 'Operator key required to change what the vessel runs';
+      detect.addEventListener('click', async () => {
+        const wanted = !(this.state?.stream?.detect ?? true);
+        detect.disabled = true;
+        try {
+          await setCameraConfig({ detect: wanted });
+          this.notify(
+            wanted
+              ? 'Detector on. The Jetson is inferring again.'
+              : 'Detector off. The cameras keep running — nothing is being inferred.',
+            'ok',
+            5000
+          );
+          await this.refreshState();
+        } catch (error) {
+          this.notify(error.message, 'error');
+        } finally {
+          detect.disabled = !this.admin;
+        }
+      });
+    }
+
+    if (capture) {
+      capture.disabled = !this.admin;
+      capture.title = this.admin
+        ? 'Ask the vessel for one full 2592×2592-class sensor frame per camera, saved '
+          + 'on this ground station. Takes seconds: the request is collected on the '
+          + "Jetson's next poll and the frames are megabytes."
+        : 'Operator key required to capture from the vessel';
+      capture.addEventListener('click', async () => {
+        // A note is optional and worth asking for: forty frames from a dock are
+        // indistinguishable a week later without one. Cancelling the prompt still
+        // captures — losing the shot because somebody hit Escape would be worse.
+        const note = window.prompt(
+          'Label for this capture (optional) — e.g. "berth 1 from 5 m, tags 0/1/7"',
+          this.prefs.captureNote || ''
+        );
+        if (note !== null) {
+          this.prefs.captureNote = note;
+          this.savePrefs(this.prefs);
+        }
+        capture.disabled = true;
+        try {
+          await requestCapture({ note: note || '' });
+          this.notify(
+            'Capture asked for. The Jetson collects it on its next poll — '
+              + 'a few seconds, then a couple of megabytes up the link.',
+            'ok',
+            6000
+          );
+          await this.refreshCaptures();
+        } catch (error) {
+          this.notify(error.message, 'error');
+        } finally {
+          capture.disabled = !this.admin;
+        }
+      });
+    }
+
     if (quality) {
       quality.disabled = !this.admin;
       quality.addEventListener('change', async () => {
@@ -216,12 +326,30 @@ export class CameraPanel {
   start() {
     this.refreshState();
     this._scheduleState();
+    if (this.nodes.capture || this.nodes.captureStatus) this.refreshCaptures();
     return this;
   }
 
   stop() {
     window.clearTimeout(this.stateTimer);
+    window.clearTimeout(this.captureTimer);
     window.clearTimeout(this.frameTimer);
+  }
+
+  async refreshCaptures() {
+    try {
+      this.captures = await fetchCaptureState();
+    } catch {
+      this.captures = null;
+    }
+    this._renderCaptures();
+    // Poll fast only while something is outstanding. With nothing pending this
+    // is a still directory that changes when somebody presses a button, so
+    // there is nothing to watch for.
+    window.clearTimeout(this.captureTimer);
+    if (this.captures?.pending) {
+      this.captureTimer = window.setTimeout(() => this.refreshCaptures(), CAPTURE_POLL_MS);
+    }
   }
 
   _scheduleState() {
@@ -260,10 +388,55 @@ export class CameraPanel {
     this.frameTimer = window.setTimeout(tick, interval);
   }
 
+  /** The capture button's label and the line under it. */
+  _renderCaptures() {
+    const { capture, captureStatus } = this.nodes;
+    const pending = this.captures?.pending ?? null;
+
+    if (capture) {
+      capture.textContent = pending
+        ? `Capturing… ${pending.received.length}/${pending.cameras.length}`
+        : 'Capture full-res';
+      capture.classList.toggle('is-on', Boolean(pending));
+      capture.disabled = !this.admin || Boolean(pending);
+    }
+    if (!captureStatus) return;
+
+    if (!this.captures) {
+      captureStatus.textContent = 'Full-res capture unavailable — the server did not answer.';
+      return;
+    }
+    const { held, bytes_held: bytes, stills, last_error: error } = this.captures;
+    if (pending) {
+      const waiting = pending.cameras.filter((id) => !pending.received.includes(id));
+      captureStatus.textContent =
+        `Waiting for cam${waiting.join('/cam')} — asked ${fmt.ago(pending.age)}. `
+        + 'The Jetson polls every 5 s, then each frame is a couple of megabytes up the 4G link.';
+      return;
+    }
+    const newest = stills?.[0];
+    captureStatus.textContent = [
+      held ? `${held} still${held === 1 ? '' : 's'} saved (${fmt.bytes(bytes)})` : 'No stills saved yet',
+      newest?.name ? `newest ${newest.name}` : null,
+      error ? `last error: ${error}` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
+
   render() {
-    const { card, grid, status, toggle, viewerToggle, quality } = this.nodes;
+    const { card, grid, status, toggle, viewerToggle, quality, detect } = this.nodes;
     const stream = this.state?.stream;
     const cameras = this.state?.cameras ?? [];
+
+    if (detect) {
+      // Default to "on" when the server has not said, matching what the Jetson
+      // itself assumes when it cannot reach shore (`cloud_camera.detect`).
+      const on = stream?.detect ?? true;
+      detect.textContent = on ? 'Detector: on' : 'Detector: OFF';
+      detect.classList.toggle('is-on', on);
+      detect.setAttribute('aria-pressed', String(on));
+    }
 
     if (toggle) {
       const on = Boolean(stream?.enabled);
@@ -336,10 +509,15 @@ export class CameraPanel {
       return `Refused: ${refusal || 'unauthorised'} (${refused} in this session, last ${fmt.ago(refusalAge)}). The boat is reaching the dashboard but its key is wrong — check LIGMAX_BOAT_KEY on ligmax-json.local.`;
     }
 
+    // Said before the stream lines, and on every one of them: with inference off
+    // the map has no new buoys on it, and "the boat has stopped seeing things" is
+    // otherwise a long hunt that ends at a button on this panel.
+    const detectorOff = stream.detect === false ? 'Detector OFF on the vessel. ' : '';
+
     if (!stream.enabled) {
-      return this.admin
-        ? 'Off. The boat sends nothing until you ask — video shares the 4G uplink with telemetry.'
-        : 'Off. An operator has to switch the vessel stream on.';
+      return detectorOff + (this.admin
+        ? 'Video off. The boat sends nothing until you ask — video shares the 4G uplink with telemetry.'
+        : 'Video off. An operator has to switch the vessel stream on.');
     }
     if (!cameras.length) {
       // Distinguishing these two is the whole reason the panel polls a state
@@ -357,6 +535,7 @@ export class CameraPanel {
     const bytes = cameras.reduce((total, camera) => total + (camera.bytes || 0), 0);
     const estimate = hz * bytes / Math.max(cameras.length, 1);
     return [
+      detectorOff ? detectorOff.trim() : null,
       `${live}/${cameras.length} live`,
       `${stream.max_width} px · q${stream.jpeg_quality} · ${stream.fps} fps asked`,
       hz ? `${fmt.fixed(hz, 1)} fps in` : null,

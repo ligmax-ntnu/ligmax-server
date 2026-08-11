@@ -32,3 +32,10 @@ light-effects.json.tmp
 # than anything a checkout should carry. `.part` files are uploads still in
 # flight; both are ignored so a git status during a competition is readable.
 trips/
+
+# Full-resolution stills captured from the dashboard (ligmax_gui/stills.py).
+# 1.5-3 MB each, two per press, and they are pictures of one particular dock on
+# one particular afternoon. `.part` files are uploads still in flight, and the
+# `.json` sidecars go with their image - both are inside the directory, so this
+# one line covers all of it.
+stills/

@@ -407,6 +407,13 @@ async function boot() {
       status: $('camera-status'),
       toggle: $('camera-toggle'),
       viewerToggle: $('camera-viewer-toggle'),
+      // These two are not stream controls and are here rather than on /control
+      // because they are about the cameras as cameras, which is what this panel
+      // is: turn the detector off, take a full-resolution photograph. See
+      // camera.js's header for why both have to live in the detector's process.
+      detect: $('camera-detect'),
+      capture: $('camera-capture'),
+      captureStatus: $('camera-capture-status'),
     },
     { admin, notify, prefs, savePrefs }
   ).start();

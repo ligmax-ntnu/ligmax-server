@@ -61,6 +61,22 @@ DEFAULT_STREAM: dict[str, Any] = {
     "jpeg_quality": 55,
     "fps": 2.0,
     "cameras": list(KNOWN_CAMERAS),
+    # Whether the Jetson should run the YOLO detector. The odd one out here -
+    # every other field is about the picture on the uplink, and this one is about
+    # inference on the vessel. It lives on this config because this config is the
+    # only channel that reaches `ligmax-json.local`: the detections go to the Pi,
+    # not here, so there is no other poll to hang it on.
+    #
+    # Defaults ON, and that default is the safe one in both directions: a fresh
+    # server tells a Jetson to detect, which is how the boat races, and a Jetson
+    # that never hears from the server detects too (`cloud_camera.detect`).
+    #
+    # Turning it off does NOT stop capture - the previews, the full-resolution
+    # stills, the bearings and the lidar all keep running. It exists because
+    # `sender.py` owns both CSI sensors and nothing else on that board can open
+    # them, so "use the cameras as cameras" has to be a mode of the detector
+    # process rather than a second process. See `stills.py`.
+    "detect": True,
 }
 
 # Guard rails on what an operator can ask the Jetson for, so a slip in the UI
@@ -269,6 +285,12 @@ class CameraRelay:
         """
         with self._lock:
             stream = dict(self._stream)
+
+            if "detect" in changes:
+                # Not folded into the loop below: this one is a bool, and it is
+                # deliberately independent of `enabled` - the case it exists for
+                # is video off, detector off, cameras used for stills.
+                stream["detect"] = bool(changes["detect"])
 
             if "enabled" in changes:
                 enabled = bool(changes["enabled"])

@@ -81,6 +81,10 @@ class Config:
     # `trips.py`. This box has ~200 GB free; the boat has a 32 GB card with the
     # operating system on it, which is the whole reason the route exists.
     trip_store: str = ""
+    # Where full-resolution stills captured from the dashboard are kept. A
+    # directory, like `trip_store` and for the same reason: these are 1.5-3 MB
+    # JPEGs and there are two per press. See `stills.py`.
+    stills_store: str = ""
     # NTRIP caster (rtk.py). Port 2101 is forwarded to this box for rtk.ligmax.no;
     # both the base station and the vessel dial out to it.
     rtk_enabled: bool = True
@@ -193,6 +197,10 @@ def load_config() -> Config:
         trip_store=(
             os.environ.get("LIGMAX_TRIP_STORE", "").strip()
             or str(REPO_ROOT / "trips")
+        ),
+        stills_store=(
+            os.environ.get("LIGMAX_STILLS_STORE", "").strip()
+            or str(REPO_ROOT / "stills")
         ),
         rtk_enabled=rtk_enabled,
         rtk_host=os.environ.get("LIGMAX_RTK_HOST", "0.0.0.0").strip() or "0.0.0.0",

@@ -1,0 +1,458 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>captures — ligmax</title>
+
+<!--
+  Full-resolution stills pulled off the Jetson and kept on this ground station.
+  Take a pair, look at them, download them, delete them.
+
+  Why this page exists rather than a panel on `/`: these are 2592x1944 JPEGs,
+  1.5-3 MB each, and the point is that they persist. The live-view panel holds one
+  frame per camera in RAM and overwrites it, which is right for a video feed and
+  useless for a photograph. `/` gets the shutter button; the pictures live here.
+
+  Standalone like `/led_control` and `/debug/lidar_viz`: one file, no shared
+  frontend modules. It talks to `/api/camera/captures`, `/api/camera/capture` and
+  `/api/session`, all of which exist for this and nothing else depends on them.
+
+  What the pictures are FOR, which is why the metadata below is not decoration:
+  measuring the 18x18 cm ArUco tags on the Njord dock. So each thumbnail carries
+  the sensor mode, whether the 180 degree rotation was on, which calibration file
+  was loaded, and what the boat's attitude and GNSS fix were - every one of which
+  a marker-pose fit needs and none of which is recoverable from the pixels. A
+  calibration is only valid for the sensor mode and the image ORIENTATION it was
+  captured in, and a mismatch on either fails silently, which is exactly why it is
+  written down beside the frame instead of assumed later.
+
+  Loading is lazy. Forty full-resolution frames is eighty megabytes, and a gallery
+  that fetches all of them on open would cost more than the uplink did to get
+  them.
+-->
+
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d131f;
+    --panel-2: #0a0f19;
+    --ink: #d7e3f5;
+    --dim: #7d8ea8;
+    --line: #1b2941;
+    --accent: #7fd4ff;
+    --warn: #f0b23c;
+    --bad: #e2453f;
+    --ok: #4fd07a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 48px;
+  }
+
+  header#bar {
+    align-items: center;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    justify-content: space-between;
+    padding: 10px 16px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+  header#bar .left, header#bar .right {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+  }
+  h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.02em; margin: 0; }
+  .pill {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--dim);
+    font-size: 12px;
+    padding: 3px 10px;
+    text-decoration: none;
+  }
+  .pill.ok { border-color: var(--ok); color: var(--ok); }
+  .pill.bad { border-color: var(--bad); color: var(--bad); }
+  .pill.warn { border-color: var(--warn); color: var(--warn); }
+  a.pill:hover { border-color: var(--accent); color: var(--accent); }
+
+  button {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    cursor: pointer;
+    font: inherit;
+    padding: 6px 12px;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { cursor: not-allowed; opacity: 0.45; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  input[type=text] {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    font: inherit;
+    padding: 6px 8px;
+  }
+
+  main { margin: 0 auto; max-width: 1280px; padding: 16px; }
+
+  section.shoot {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .row { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; }
+  .grow { flex: 1 1 260px; min-width: 200px; }
+  .note { color: var(--dim); font-size: 12px; margin: 8px 0 0; }
+  .note.bad { color: var(--bad); }
+  .note.ok { color: var(--ok); }
+
+  #gallery {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    margin-top: 18px;
+  }
+  figure.shot {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin: 0;
+    overflow: hidden;
+  }
+  figure.shot img {
+    aspect-ratio: 4 / 3;
+    background: var(--panel-2);
+    display: block;
+    object-fit: contain;
+    width: 100%;
+  }
+  figcaption { padding: 10px 12px 12px; }
+  .shot-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .shot-note { color: var(--accent); font-size: 12px; margin-top: 2px; }
+  dl.facts {
+    display: grid;
+    gap: 1px 8px;
+    grid-template-columns: auto 1fr;
+    margin: 8px 0 0;
+  }
+  dl.facts dt { color: var(--dim); font-size: 11px; }
+  dl.facts dd {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .shot-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .shot-actions a, .shot-actions button { font-size: 12px; padding: 4px 9px; }
+  .shot-actions a {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .shot-actions a:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { color: var(--dim); padding: 28px 4px; text-align: center; }
+  .hidden { display: none !important; }
+</style>
+
+<header id="bar">
+  <div class="left">
+    <a href="/" class="pill" title="Back to the overview">&larr; Overview</a>
+    <a href="/control" class="pill" title="The control &amp; data page">Control</a>
+    <h1>captures</h1>
+    <span id="role-pill" class="pill">read-only</span>
+  </div>
+  <div class="right">
+    <span id="held-pill" class="pill">&mdash;</span>
+    <button id="refresh-btn">Refresh</button>
+  </div>
+</header>
+
+<main>
+  <section class="shoot">
+    <div class="row">
+      <input class="grow" id="note" type="text" maxlength="120"
+             placeholder='Label, e.g. "berth 1 from 5 m, tags 0/1/7"'>
+      <button class="primary" id="shoot-btn" disabled>Capture full-res &times;2</button>
+      <button id="cancel-btn" class="hidden">Cancel</button>
+    </div>
+    <p class="note" id="shoot-note">
+      One whole sensor frame per camera, uncropped, saved on this ground station.
+      The Jetson collects the request on its next config poll (about 5 s) and then
+      each frame is a couple of megabytes up the 4G link, so expect seconds rather
+      than an instant.
+    </p>
+  </section>
+
+  <div id="gallery"></div>
+  <p class="empty hidden" id="empty">
+    Nothing captured yet. Press <em>Capture full-res</em> above, or the same button
+    on the overview's camera panel.
+  </p>
+</main>
+
+<script>
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const POLL_IDLE_MS = 15000;
+  const POLL_PENDING_MS = 1500;
+
+  let admin = false;
+  let timer = null;
+  let lastPending = null;
+
+  /* --- helpers ---------------------------------------------------------- */
+
+  function bytes(n) {
+    if (!Number.isFinite(n)) return '—';
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(0)} kB`;
+    return `${(n / 1048576).toFixed(2)} MB`;
+  }
+
+  function stamp(t) {
+    if (!Number.isFinite(t)) return '—';
+    return new Date(t * 1000).toLocaleString('en-GB');
+  }
+
+  function setNote(text, kind) {
+    const node = $('shoot-note');
+    node.textContent = text;
+    node.className = kind ? `note ${kind}` : 'note';
+  }
+
+  async function api(path, options) {
+    const response = await fetch(path, { credentials: 'same-origin', ...options });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  }
+
+  /* --- one card --------------------------------------------------------- */
+
+  /* The facts a marker-pose fit needs and the pixels cannot supply. Attitude and
+     the fix come from the telemetry link rather than from the Jetson, so they are
+     the NEAREST frame to the shutter and not a synchronised one - `vessel_age_s`
+     is that gap, and it is shown rather than hidden because it is measured across
+     two clocks, one of which (the Jetson's) has no RTC and can step. */
+  function facts(shot) {
+    const v = shot.vessel || {};
+    const attitude = v.attitude || {};
+    const gps = v.gps || {};
+    const motion = v.motion || {};
+    const rows = [
+      ['saved', stamp(shot.stored_at)],
+      ['size', `${shot.width || '?'}×${shot.height || '?'} · ${bytes(shot.bytes)}`],
+      // Two silent-failure modes, written down: a calibration does not transfer
+      // across sensor modes, and it is only valid for the orientation it was
+      // captured in. Both produce a plausible, wrong answer.
+      ['mode / rot', `${shot.mode ?? '?'} · ${shot.rotated_180 ? '180°' : 'upright'}`],
+      ['calib', shot.calib || 'none loaded'],
+      ['colour', shot.colour || '—'],
+    ];
+    if (attitude.roll_deg !== undefined || attitude.pitch_deg !== undefined) {
+      rows.push([
+        'roll / pitch',
+        `${attitude.roll_deg ?? '?'}° / ${attitude.pitch_deg ?? '?'}°`,
+      ]);
+    }
+    if (motion.heading_deg !== undefined) rows.push(['heading', `${motion.heading_deg}°`]);
+    if (gps.fix) rows.push(['fix', `${gps.fix}${gps.satellites ? ` · ${gps.satellites} sats` : ''}`]);
+    if (Array.isArray(v.position)) {
+      rows.push(['grid', `${v.position[0]?.toFixed?.(1) ?? '?'}, ${v.position[1]?.toFixed?.(1) ?? '?'} m`]);
+    }
+    if (shot.vessel_age_s !== undefined && shot.vessel_age_s !== null) {
+      rows.push(['telemetry age', `${shot.vessel_age_s} s from the shutter`]);
+    }
+    if (shot.vessel_why) rows.push(['no pose', shot.vessel_why]);
+    return rows;
+  }
+
+  function card(shot) {
+    const figure = document.createElement('figure');
+    figure.className = 'shot';
+
+    const image = document.createElement('img');
+    // Lazy, and this is the whole reason the gallery is affordable: a page of
+    // 2 MB frames fetched eagerly would cost more than the captures did.
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.alt = shot.name;
+    image.src = `/api/camera/captures/${encodeURIComponent(shot.name)}`;
+    figure.append(image);
+
+    const caption = document.createElement('figcaption');
+    const name = document.createElement('div');
+    name.className = 'shot-name';
+    name.textContent = shot.name;
+    caption.append(name);
+
+    if (shot.note) {
+      const note = document.createElement('div');
+      note.className = 'shot-note';
+      note.textContent = shot.note;
+      caption.append(note);
+    }
+
+    const list = document.createElement('dl');
+    list.className = 'facts';
+    for (const [label, value] of facts(shot)) {
+      const dt = document.createElement('dt');
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      list.append(dt, dd);
+    }
+    caption.append(list);
+
+    const actions = document.createElement('div');
+    actions.className = 'shot-actions';
+    const open = document.createElement('a');
+    open.href = `/api/camera/captures/${encodeURIComponent(shot.name)}`;
+    open.target = '_blank';
+    open.rel = 'noopener';
+    open.textContent = 'Full size';
+    const download = document.createElement('a');
+    download.href = `/api/camera/captures/${encodeURIComponent(shot.name)}?download=1`;
+    download.textContent = 'Download';
+    actions.append(open, download);
+    if (admin) {
+      const remove = document.createElement('button');
+      remove.className = 'danger';
+      remove.textContent = 'Delete';
+      remove.addEventListener('click', async () => {
+        if (!window.confirm(`Delete ${shot.name}? This cannot be undone.`)) return;
+        remove.disabled = true;
+        try {
+          await api(`/api/camera/captures/${encodeURIComponent(shot.name)}`, {
+            method: 'DELETE',
+          });
+          await load();
+        } catch (error) {
+          setNote(error.message, 'bad');
+          remove.disabled = false;
+        }
+      });
+      actions.append(remove);
+    }
+    caption.append(actions);
+    figure.append(caption);
+    return figure;
+  }
+
+  /* --- state ------------------------------------------------------------ */
+
+  function render(state) {
+    const pending = state.pending || null;
+    const held = state.held || 0;
+
+    $('held-pill').textContent = held
+      ? `${held} still${held === 1 ? '' : 's'} · ${bytes(state.bytes_held)}`
+      : 'nothing saved';
+
+    $('shoot-btn').disabled = !admin || Boolean(pending);
+    $('shoot-btn').textContent = pending
+      ? `Capturing… ${pending.received.length}/${pending.cameras.length}`
+      : 'Capture full-res ×2';
+    $('cancel-btn').classList.toggle('hidden', !(admin && pending));
+
+    if (pending) {
+      const waiting = pending.cameras.filter((id) => !pending.received.includes(id));
+      setNote(
+        `Waiting for cam${waiting.join(', cam')} — asked ${Math.round(pending.age)} s ago`
+          + (pending.note ? ` ("${pending.note}")` : '')
+          + `. Gives up after ${Math.round(state.limits.timeout_s)} s.`,
+        'ok'
+      );
+    } else if (state.last_error) {
+      setNote(`Last error: ${state.last_error}`, 'bad');
+    } else if (lastPending && !pending) {
+      setNote('Captured. The newest pair is at the top.', 'ok');
+    }
+    lastPending = pending;
+
+    const gallery = $('gallery');
+    gallery.textContent = '';
+    for (const shot of state.stills || []) gallery.append(card(shot));
+    $('empty').classList.toggle('hidden', (state.stills || []).length > 0);
+
+    // Poll hard only while something is in flight; otherwise this directory
+    // changes when somebody presses a button.
+    window.clearTimeout(timer);
+    timer = window.setTimeout(load, pending ? POLL_PENDING_MS : POLL_IDLE_MS);
+  }
+
+  async function load() {
+    try {
+      const state = await api('/api/camera/captures');
+      admin = Boolean(state.admin);
+      applyAdmin(admin);
+      render(state);
+    } catch (error) {
+      setNote(`Could not read the store: ${error.message}`, 'bad');
+      window.clearTimeout(timer);
+      timer = window.setTimeout(load, POLL_IDLE_MS);
+    }
+  }
+
+  function applyAdmin(isAdmin) {
+    const pill = $('role-pill');
+    pill.textContent = isAdmin ? 'operator' : 'read-only';
+    pill.className = isAdmin ? 'pill ok' : 'pill';
+    $('note').disabled = !isAdmin;
+    if (!isAdmin) {
+      $('shoot-btn').disabled = true;
+      $('shoot-btn').title = 'Operator key required to capture from the vessel';
+    }
+  }
+
+  /* --- actions ---------------------------------------------------------- */
+
+  $('shoot-btn').addEventListener('click', async () => {
+    $('shoot-btn').disabled = true;
+    try {
+      const state = await api('/api/camera/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: $('note').value || '' }),
+      });
+      render(state);
+    } catch (error) {
+      setNote(error.message, 'bad');
+      $('shoot-btn').disabled = !admin;
+    }
+  });
+
+  $('cancel-btn').addEventListener('click', async () => {
+    try {
+      render(await api('/api/camera/capture', { method: 'DELETE' }));
+    } catch (error) {
+      setNote(error.message, 'bad');
+    }
+  });
+
+  $('refresh-btn').addEventListener('click', load);
+
+  applyAdmin(false); // safe default until the store's reply says otherwise
+  load();
+</script>

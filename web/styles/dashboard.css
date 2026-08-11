@@ -1748,6 +1748,21 @@
   gap: 0.4rem;
 }
 
+/* The second row: the detector switch, the full-res shutter and the link to
+   where the stills land. Wraps, because three chips and a link do not fit a
+   phone-width card in one line and a horizontal scrollbar inside a card is
+   worse than two rows. */
+.cam-controls--tools {
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+}
+
+.cam-controls--tools a.chip {
+  align-items: center;
+  display: inline-flex;
+  text-decoration: none;
+}
+
 /* While the vessel is streaming, the card carries a hint of the accent so it is
    obvious at a glance that the boat is spending uplink on video. */
 .card--camera[data-streaming='true'] {

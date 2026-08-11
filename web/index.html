@@ -152,6 +152,27 @@
                   Send video from the boat
                 </button>
               </div>
+              <!-- Neither of these is about the live view, and both are here
+                   because `sender.py` owns both CSI sensors: nothing else on the
+                   Jetson can open a camera while it is running, so "turn the
+                   detector off" and "take one proper photograph" have to be
+                   modes of that process rather than separate tools.
+
+                   Capture writes to the ground station's disk, not to this
+                   panel - the whole point is a 2592x1944 frame, five times what
+                   the relay will hold in RAM. `/captures` is where they land. -->
+              <div class="cam-controls cam-controls--tools">
+                <button class="chip chip--toggle" id="camera-detect" type="button" aria-pressed="true" disabled>
+                  Detector: on
+                </button>
+                <button class="chip chip--toggle" id="camera-capture" type="button" disabled>
+                  Capture full-res
+                </button>
+                <a class="chip" href="/captures" title="Full-resolution stills saved on the ground station">
+                  Saved stills &rarr;
+                </a>
+              </div>
+              <p class="card-note card-note--tight" id="camera-capture-status">No stills saved yet.</p>
             </section>
 
             <!-- Admins get the stop button here; everyone else sees nothing at
