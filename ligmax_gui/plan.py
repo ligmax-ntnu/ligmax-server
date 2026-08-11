@@ -156,6 +156,45 @@ ROLES: dict[str, dict[str, Any]] = {
         "settles": True,
         "default_hold_s": 10.0,
     },
+    # The two roles that can actually work as of 2026-08-11: both lidars are down,
+    # so every role above that needs one will sit searching until an operator takes
+    # over.  Same manoeuvre, berth found from the dock's three AR markers instead.
+    "park_tag": {
+        "label": "Dock on AR tags (bow-in)",
+        "help": (
+            "Task 3.1 with the cameras instead of the lidar. Finds the berth "
+            "from its three 18 cm AR tags, enters bow-first, holds 10 s, then "
+            "REVERSES out. Picks between the two berths by which one's END tag "
+            "it can see - a boat in a berth hides that tag - and 'Berth' "
+            "overrules it. Buoys are ignored entirely. THE ONLY DOCKING ROLE "
+            "WITH A WORKING SENSOR."
+        ),
+        "settles": True,
+        "default_hold_s": 10.0,
+    },
+    "park_tag_parallel": {
+        "label": "Dock on AR tags (alongside)",
+        "help": (
+            "Task 3.2 with the cameras. The same three tags 4.13 m apart "
+            "instead of 2 m, entered bow-first down the normal and then turned "
+            "90 degrees inside: hold 10 s parallel, then continue forward. "
+            "There is only one alongside berth, so no choosing."
+        ),
+        "settles": True,
+        "default_hold_s": 10.0,
+    },
+}
+
+#: Roles that find their berth from the AR tags.  Mirrors ``plan.TAG_ROLES`` on the
+#: vessel.
+TAG_ROLES = frozenset({"park_tag", "park_tag_parallel"})
+
+#: Which berths each tag role may be pointed at by name.  Mirrors the keys of
+#: ``perception/artags.BOW_IN_BERTHS`` and ``PARALLEL_BERTHS`` on the vessel; the
+#: ids behind them are the vessel's business and are not duplicated here.
+BERTHS: dict[str, tuple[str, ...]] = {
+    "park_tag": ("berth 1", "berth 2"),
+    "park_tag_parallel": ("alongside",),
 }
 
 #: Optional per-waypoint numbers, and the range the vessel will accept.  Sending
@@ -182,6 +221,10 @@ def role_table() -> dict[str, dict[str, Any]]:
             "help": spec["help"],
             "settles": spec["settles"],
             "default_hold_s": spec["default_hold_s"],
+            # Present only on the tag roles, and it is what makes the berth
+            # selector render from one source instead of a fourth copy of two
+            # strings the vessel will refuse if they are wrong.
+            **({"berths": list(BERTHS[name])} if name in BERTHS else {}),
         }
         for name, spec in ROLES.items()
     }
@@ -286,6 +329,33 @@ def _waypoint(item: Any, position: int) -> tuple[dict[str, Any] | None, str | No
         if bearing is None:
             return None, f"waypoint {position}: channel_bearing is not a number"
         out["channel_bearing"] = bearing % 360.0
+
+    if item.get("park_probe_deg") is not None:
+        probe = _finite(item["park_probe_deg"])
+        if probe is None or not (0.0 <= probe <= 360.0):
+            return None, (
+                f"waypoint {position}: park_probe_deg must be a bearing 0..360"
+            )
+        out["park_probe_deg"] = probe
+
+    # Which berth to take, for the tag roles only.  Refused rather than dropped for
+    # the reason the vessel gives: a misspelt berth name would fall through to "let
+    # the tags decide", which is indistinguishable from not having asked — the worst
+    # outcome for an override whose whole purpose is overruling the tags.
+    if str(item.get("berth") or "").strip():
+        berth = str(item["berth"]).strip().lower()
+        if role not in TAG_ROLES:
+            return None, (
+                f"waypoint {position}: 'berth' only means something for "
+                f"{' or '.join(sorted(TAG_ROLES))}, and this one is '{role}'"
+            )
+        allowed = BERTHS[role]
+        if berth not in allowed:
+            return None, (
+                f"waypoint {position}: '{item['berth']}' is not a berth for "
+                f"{role} ({', '.join(allowed)})"
+            )
+        out["berth"] = berth
 
     notes = str(item.get("notes") or "")[:MAX_NOTES].strip()
     if notes:

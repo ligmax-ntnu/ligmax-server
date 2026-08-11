@@ -1,0 +1,1182 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dock — ligmax</title>
+
+<!--
+  NJORD Task 3 and nothing else.
+
+  A fifth page, same treatment as `/led_control` and `/debug/lidar_viz`: one
+  file, no shared frontend modules, read gate like every other page, admin gate
+  per command. It polls `/api/session` and `/api/snapshot` and sends through
+  `/api/command` (`set_plan`, `arm`, `set_mode`, `autopilot_start`,
+  `set_speed_limit`), so it needed no endpoint of its own.
+
+  Why it exists rather than being three more panels on `/control`:
+
+  * **No YOLO, no lidar.** Both lidars died on 2026-08-11 and the buoy detector
+    is irrelevant to docking, so every layer that draws either of them is gone.
+    What is left is the AR tags, the boat, and three waypoints.
+  * **The boat's own position, big, with a copy button.** The middle waypoint of
+    Task 3 goes wherever the berth is actually in view, which is found by driving
+    the boat there by hand and reading the position off. That workflow is the
+    reason this page is worth having, and it is one button here against a
+    coordinate hunt through `/control`'s telemetry table.
+  * **The chart draws no map tiles.** Tiles come from the public internet, and
+    this page has to work on a pontoon on a 4G phone hotspot with the boat
+    alongside. A plain metre grid, the boat, the waypoints and the berth.
+
+  Everything on it is untested against a real vessel (2026-08-11).
+-->
+
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d131f;
+    --panel-2: #0a0f19;
+    --ink: #d7e3f5;
+    --dim: #7d8ea8;
+    --line: #1b2941;
+    --accent: #7fd4ff;
+    --warn: #f0b23c;
+    --bad: #e2453f;
+    --ok: #4fd07a;
+    --tag: #eb64eb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 48px;
+  }
+  a { color: var(--accent); }
+
+  header#bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel-2);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20;
+  }
+  header#bar h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header#bar .spacer { flex: 1; }
+  .pill {
+    padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--line); background: #101827; color: var(--dim);
+    white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: #1d4b30; }
+  .pill.warn { color: var(--warn); border-color: #4d3b16; }
+  .pill.bad { color: var(--bad); border-color: #4d1f1d; }
+
+  main { padding: 16px; display: grid; gap: 16px; max-width: 1500px; margin: 0 auto; }
+  @media (min-width: 1100px) { main { grid-template-columns: minmax(430px, 1fr) minmax(430px, 1.15fr); } }
+
+  section.card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px;
+  }
+  section.card > h2 {
+    margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--dim); font-weight: 600;
+  }
+  .span-2 { grid-column: 1 / -1; }
+
+  button, select, input {
+    font: inherit; color: var(--ink); background: #131c2c;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #2d4467; background: #18233a; }
+  button:disabled, input:disabled, select:disabled { opacity: .42; cursor: not-allowed; }
+  button.primary { background: #14344d; border-color: #276d94; color: #d6f1ff; }
+  button.primary:hover:not(:disabled) { background: #18415f; }
+  button.danger { background: #3a1513; border-color: #7d2a26; color: #ffd9d6; }
+  button.small { padding: 3px 7px; font-size: 12px; }
+  input[type="number"], input.coord { font-variant-numeric: tabular-nums; }
+
+  .muted { color: var(--dim); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  /* -- the figures strip ------------------------------------------------- */
+  #figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
+  .fig { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .fig .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  .fig .v { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.25; }
+  .fig .u { font-size: 12px; color: var(--dim); font-weight: 400; }
+  .fig.ok .v { color: var(--ok); }
+  .fig.warn .v { color: var(--warn); }
+  .fig.bad .v { color: var(--bad); }
+
+  /* -- boat position ----------------------------------------------------- */
+  #position-block { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  #position-block .ll {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 20px; font-weight: 600; letter-spacing: -.01em;
+    user-select: all; word-break: break-all;
+  }
+  #position-block .dms { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dim); }
+
+  /* -- waypoint slots ---------------------------------------------------- */
+  .slot { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); margin-bottom: 10px; }
+  .slot.armed-target { border-color: #276d94; box-shadow: 0 0 0 1px #276d9455 inset; }
+  .slot h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; }
+  .slot .hint { font-size: 11.5px; color: var(--dim); margin-bottom: 8px; }
+  .slot .coords { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+  .slot label { display: block; font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+  .slot input.coord { width: 100%; }
+  .slot .empty { color: var(--warn); }
+
+  table.kv { width: 100%; border-collapse: collapse; }
+  table.kv td { padding: 2px 0; vertical-align: top; }
+  table.kv td.k { color: var(--dim); width: 45%; padding-right: 8px; }
+  table.kv td.v { font-variant-numeric: tabular-nums; }
+
+  table.tags { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  table.tags th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); font-weight: 600; padding: 3px 6px 3px 0; }
+  table.tags td { padding: 2px 6px 2px 0; border-top: 1px solid #14203400; }
+  table.tags tr.dim td { color: var(--dim); }
+  .tagchip { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: #33113322; border: 1px solid var(--tag); color: var(--tag); font-weight: 600; padding: 0 4px; }
+
+  #chart-wrap { position: relative; }
+  canvas#chart { width: 100%; height: auto; display: block; background: #050810; border-radius: 8px; border: 1px solid var(--line); cursor: crosshair; }
+  #chart-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11.5px; color: var(--dim); }
+  #chart-legend b { font-weight: 600; }
+
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cams figure { margin: 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .cams img { width: 100%; display: block; background: #04060c; min-height: 90px; }
+  .cams figcaption { font-size: 11px; color: var(--dim); padding: 4px 7px; display: flex; justify-content: space-between; gap: 6px; }
+
+  .note { border-left: 3px solid var(--line); padding: 6px 0 6px 9px; margin: 8px 0 0; font-size: 12px; color: var(--dim); }
+  .note.warn { border-color: var(--warn); color: #e8cf9c; }
+  .note.bad { border-color: var(--bad); color: #f0b8b5; }
+  .note.ok { border-color: var(--ok); color: #b6e6c6; }
+  #toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: #16233a; border: 1px solid #2d4467; border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; z-index: 40; display: none; max-width: 90vw;
+  }
+</style>
+
+<header id="bar">
+  <h1>Task 3 — docking</h1>
+  <span class="pill" id="pill-status">status —</span>
+  <span class="pill" id="pill-mode">mode —</span>
+  <span class="pill" id="pill-fix">fix —</span>
+  <span class="pill" id="pill-tags">tags —</span>
+  <span class="spacer"></span>
+  <span class="pill" id="pill-admin">read only</span>
+  <span class="pill" id="pill-link">no data</span>
+  <a href="/">overview</a>
+  <a href="/control">control</a>
+</header>
+
+<main>
+  <!-- ============================ left column ============================ -->
+  <section class="card">
+    <h2>Where the boat is</h2>
+    <div id="position-block">
+      <div class="muted">Latitude, longitude — decimal degrees</div>
+      <div class="ll" id="pos-decimal">—</div>
+      <div class="dms" id="pos-dms">—</div>
+      <div class="row" style="margin-top: 9px">
+        <button class="small" id="btn-copy">Copy</button>
+        <button class="small" id="btn-copy-lat">Copy lat</button>
+        <button class="small" id="btn-copy-lon">Copy lon</button>
+        <span class="muted" id="pos-extra"></span>
+      </div>
+    </div>
+    <p class="note">Drive the boat to a spot where the berth's tags actually
+      appear below, then press <b>Set from boat</b> on waypoint 2. That is the
+      whole trick: the middle waypoint may go anywhere, and the only place worth
+      putting it is somewhere the tags are already in view.</p>
+  </section>
+
+  <section class="card">
+    <h2>Live figures</h2>
+    <div id="figures"></div>
+    <p class="note" id="reason-note">—</p>
+  </section>
+
+  <!-- ============================ waypoints ============================== -->
+  <section class="card span-2">
+    <h2>The three waypoints</h2>
+    <div class="row" style="margin-bottom: 10px">
+      <button class="small" id="btn-load-njord">Load handed-out GPS 7 / 8 / 9</button>
+      <button class="small" id="btn-clear-all">Clear all</button>
+      <span class="muted">or click the chart to place whichever slot is selected</span>
+    </div>
+
+    <div id="slots"></div>
+
+    <div class="row" style="margin-top: 4px">
+      <button class="primary admin-only" id="btn-send-plan">Send plan to boat</button>
+      <button class="admin-only" id="btn-arm">Arm</button>
+      <button class="admin-only" id="btn-start">Engage autonomy</button>
+      <button class="admin-only" id="btn-stop">Disengage</button>
+      <button class="danger admin-only" id="btn-estop">E-STOP</button>
+      <span class="muted" id="plan-status"></span>
+    </div>
+    <div class="row" style="margin-top: 8px">
+      <label class="muted" for="speed-input">Speed limit</label>
+      <input type="number" id="speed-input" class="admin-only" min="0.1" max="2.5722"
+             step="0.05" value="0.5" style="width: 90px">
+      <span class="muted">m/s — a ceiling on everything, docking creeps included</span>
+      <button class="small admin-only" id="btn-speed">Set</button>
+    </div>
+    <p class="note" id="plan-note">Send the plan, then <b>Arm</b>, then
+      <b>Engage autonomy</b>. Sending a plan does not start the boat.</p>
+  </section>
+
+  <!-- ============================ chart ================================== -->
+  <section class="card">
+    <h2>Chart — boat, waypoints, tags, berth</h2>
+    <div id="chart-wrap">
+      <canvas id="chart" width="760" height="760"></canvas>
+    </div>
+    <div id="chart-legend">
+      <span><b style="color:#7fd4ff">◆</b> boat</span>
+      <span><b style="color:#f0b23c">●</b> waypoints</span>
+      <span><b style="color:#eb64eb">▲</b> AR tags</span>
+      <span><b style="color:#4fd07a">▭</b> berth &amp; the dot</span>
+      <span id="chart-scale" class="muted"></span>
+    </div>
+  </section>
+
+  <!-- ============================ tags =================================== -->
+  <section class="card">
+    <h2>AR tags &amp; the berth</h2>
+    <div id="tag-summary"></div>
+    <table class="tags" id="tag-table" style="margin-top: 8px">
+      <thead><tr><th>id</th><th>cam</th><th>range</th><th>bearing</th><th>px</th><th>incid.</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="berth-block" style="margin-top: 10px"></div>
+  </section>
+
+  <!-- ============================ cameras ================================ -->
+  <section class="card span-2">
+    <h2>Cameras</h2>
+    <div class="row" style="margin-bottom: 10px">
+      <button class="admin-only" id="btn-video">Turn video on</button>
+      <label class="muted" for="cam-width">width</label>
+      <select id="cam-width" class="admin-only">
+        <option value="320">320</option>
+        <option value="480" selected>480</option>
+        <option value="640">640</option>
+        <option value="800">800</option>
+      </select>
+      <label class="muted" for="cam-fps">fps</label>
+      <select id="cam-fps" class="admin-only">
+        <option value="1">1</option>
+        <option value="2" selected>2</option>
+        <option value="4">4</option>
+        <option value="6">6</option>
+      </select>
+      <span class="muted" id="cam-status">—</span>
+    </div>
+    <div class="cams">
+      <figure><img id="cam0" alt="camera 0"><figcaption><span>cam0 — port</span><span id="cam0-age">—</span></figcaption></figure>
+      <figure><img id="cam1" alt="camera 1"><figcaption><span>cam1 — starboard</span><span id="cam1-age">—</span></figcaption></figure>
+    </div>
+    <p class="note">Tag outlines are burned in by the Jetson, in magenta, with the
+      id and range. The cameras look <b>port and starboard</b>, so anything ahead
+      of the bow is at the edge of both frames — that is where the tags will be,
+      and it is normal. If the picture is the narrow 2:1 detector band rather than
+      the whole fisheye, the tags are outside it: restart
+      <code>sender.py</code> with <code>--preview-full</code>.</p>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const POLL_MS = 500;
+
+  // The GPS points handed out on the competition morning, read off
+  // "GPS points for tasks.xlsx". 7 is the start (~10 m off the dock), 8 is
+  // outside the berths, 9 is where the timer stops (NJORD §9.3).
+  //
+  // A convenience only. If the organisers hand out different numbers, type them
+  // in - nothing here depends on these being right.
+  const NJORD = {
+    7: { lat: 63.44097500, lon: 10.42378333 },
+    8: { lat: 63.44093333, lon: 10.42406111 },
+    9: { lat: 63.44084722, lon: 10.42404444 },
+  };
+
+  // The three slots, in plan order. `role` is fixed for the outer two and chosen
+  // for the middle one, because that is the only one where there is a decision.
+  const SLOTS = [
+    {
+      key: 'start', title: '1 — Start', role: 'transit', preset: 7,
+      hint: 'GPS 7. Driven to under remote control, then autonomy is engaged here. '
+          + 'Plain transit: no berth, no tags.',
+    },
+    {
+      key: 'dock', title: '2 — Outside the dock', role: null, preset: 8,
+      hint: 'GPS 8, or anywhere the tags are in view. THIS is the docking waypoint: '
+          + 'the boat runs to it, then finds the berth from the tags. Lay it on the '
+          + 'berth centreline, within about 3 m of the mouth.',
+    },
+    {
+      key: 'end', title: '3 — End', role: 'hold', preset: 9,
+      hint: 'GPS 9. The timer stops here. Holds station on the spot rather than '
+          + 'driving through it.',
+    },
+  ];
+
+  let admin = false;
+  let session = null;
+  let snap = null;
+  let lastFrameAt = 0;
+  let selectedSlot = 'dock';
+  let videoOn = false;
+  const points = {};      // slot key -> {lat, lon}
+  const trail = [];       // recent boat positions, grid metres
+
+  // ------------------------------------------------------------------ helpers
+
+  function toast(message, kind) {
+    const el = $('toast');
+    el.textContent = message;
+    el.style.display = 'block';
+    el.style.borderColor = kind === 'bad' ? '#7d2a26' : kind === 'ok' ? '#1d4b30' : '#2d4467';
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.style.display = 'none'; }, 4200);
+  }
+
+  function num(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  /** Dotted path into the snapshot, tolerating every level being absent. */
+  function dig(root, path) {
+    let node = root;
+    for (const part of path.split('.')) {
+      if (node === null || node === undefined) return undefined;
+      node = node[part];
+    }
+    return node;
+  }
+
+  const tel = (path) => dig(snap, `telemetry.${path}`);
+
+  function dms(value, positive, negative) {
+    if (num(value) === null) return '—';
+    const hemi = value >= 0 ? positive : negative;
+    const abs = Math.abs(value);
+    const deg = Math.floor(abs);
+    const minFull = (abs - deg) * 60;
+    const min = Math.floor(minFull);
+    const sec = (minFull - min) * 60;
+    return `${deg}°${String(min).padStart(2, '0')}′${sec.toFixed(2).padStart(5, '0')}″ ${hemi}`;
+  }
+
+  async function postCommand(name, args) {
+    const res = await fetch('/api/command', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, args: args || {} }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function run(label, name, args) {
+    if (!admin) return;
+    try {
+      await postCommand(name, args);
+      toast(`${label} sent`, 'ok');
+    } catch (err) {
+      toast(`${label} refused: ${err.message}`, 'bad');
+    }
+  }
+
+  function copy(text, what) {
+    if (!text || text === '—') { toast('nothing to copy yet', 'bad'); return; }
+    const done = () => toast(`${what} copied: ${text}`, 'ok');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => fallback());
+    } else fallback();
+    function fallback() {
+      // http:// on a LAN address is not a secure context, so navigator.clipboard
+      // is simply absent there - and a ground station on a pontoon is exactly
+      // that. Without this the copy button silently does nothing.
+      const box = document.createElement('textarea');
+      box.value = text;
+      box.style.position = 'fixed';
+      box.style.opacity = '0';
+      document.body.appendChild(box);
+      box.select();
+      try { document.execCommand('copy'); done(); }
+      catch (e) { toast('could not copy — select the text instead', 'bad'); }
+      document.body.removeChild(box);
+    }
+  }
+
+  // ------------------------------------------------------------------- slots
+
+  function slotRoleOptions() {
+    const roles = (session && session.waypoint_roles) || {};
+    const wanted = ['park_tag', 'park_tag_parallel'];
+    return wanted.filter((r) => roles[r]).map((r) => ({ name: r, label: roles[r].label }));
+  }
+
+  function buildSlots() {
+    const host = $('slots');
+    host.innerHTML = '';
+    for (const slot of SLOTS) {
+      const el = document.createElement('div');
+      el.className = 'slot';
+      el.dataset.key = slot.key;
+      const isDock = slot.key === 'dock';
+      el.innerHTML = `
+        <div class="row" style="justify-content: space-between">
+          <h3>${slot.title}</h3>
+          <label class="muted" style="margin:0">
+            <input type="radio" name="pick" value="${slot.key}"
+                   ${slot.key === selectedSlot ? 'checked' : ''}> place from chart
+          </label>
+        </div>
+        <div class="hint">${slot.hint}</div>
+        <div class="coords">
+          <div><label>Latitude</label>
+            <input class="coord" data-f="lat" inputmode="decimal" placeholder="63.4409750"></div>
+          <div><label>Longitude</label>
+            <input class="coord" data-f="lon" inputmode="decimal" placeholder="10.4237833"></div>
+        </div>
+        <div class="row">
+          <button class="small" data-a="from-boat">Set from boat</button>
+          <button class="small" data-a="preset">GPS ${slot.preset}</button>
+          <button class="small" data-a="clear">Clear</button>
+          <span class="muted" data-o="state"></span>
+        </div>
+        ${isDock ? `
+        <div class="coords" style="margin-top:8px; grid-template-columns: 1fr 1fr">
+          <div><label>Berth type</label>
+            <select data-f="role"></select></div>
+          <div><label>Berth (blank = let the tags choose)</label>
+            <select data-f="berth"></select></div>
+        </div>
+        <div class="coords" style="grid-template-columns: 1fr 1fr">
+          <div><label>Park offset, m (+ = deeper in)</label>
+            <input class="coord" data-f="park_offset_m" inputmode="decimal" placeholder="0"></div>
+          <div><label>Hold, s (blank = the rule's 10)</label>
+            <input class="coord" data-f="hold_s" inputmode="decimal" placeholder="10"></div>
+        </div>` : ''}
+      `;
+      host.appendChild(el);
+
+      el.querySelector('input[name="pick"]').addEventListener('change', (ev) => {
+        selectedSlot = ev.target.value;
+        paintSlots();
+      });
+      el.querySelector('[data-a="from-boat"]').addEventListener('click', () => {
+        const lat = num(tel('gps.lat')), lon = num(tel('gps.lon'));
+        if (lat === null || lon === null) { toast('no GNSS position yet', 'bad'); return; }
+        setPoint(slot.key, lat, lon);
+        toast(`${slot.title}: taken from the boat`, 'ok');
+      });
+      el.querySelector('[data-a="preset"]').addEventListener('click', () => {
+        const p = NJORD[slot.preset];
+        setPoint(slot.key, p.lat, p.lon);
+      });
+      el.querySelector('[data-a="clear"]').addEventListener('click', () => {
+        delete points[slot.key];
+        paintSlots();
+      });
+      for (const input of el.querySelectorAll('input.coord[data-f="lat"], input.coord[data-f="lon"]')) {
+        input.addEventListener('change', () => readSlotInputs(slot.key));
+      }
+      if (isDock) {
+        const roleSel = el.querySelector('select[data-f="role"]');
+        for (const opt of slotRoleOptions()) {
+          const o = document.createElement('option');
+          o.value = opt.name; o.textContent = opt.label;
+          roleSel.appendChild(o);
+        }
+        if (!roleSel.options.length) {
+          const o = document.createElement('option');
+          o.value = 'park_tag'; o.textContent = 'Dock on AR tags (bow-in)';
+          roleSel.appendChild(o);
+        }
+        roleSel.addEventListener('change', () => { paintBerthOptions(); paintSlots(); });
+        paintBerthOptions();
+      }
+    }
+    paintSlots();
+  }
+
+  function dockEl() { return document.querySelector('.slot[data-key="dock"]'); }
+
+  function dockRole() {
+    const sel = dockEl() && dockEl().querySelector('select[data-f="role"]');
+    return (sel && sel.value) || 'park_tag';
+  }
+
+  function paintBerthOptions() {
+    const el = dockEl();
+    if (!el) return;
+    const sel = el.querySelector('select[data-f="berth"]');
+    const roles = (session && session.waypoint_roles) || {};
+    const berths = (roles[dockRole()] && roles[dockRole()].berths) || [];
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">let the tags choose</option>';
+    for (const b of berths) {
+      const o = document.createElement('option');
+      o.value = b; o.textContent = b;
+      sel.appendChild(o);
+    }
+    if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  }
+
+  function setPoint(key, lat, lon) {
+    points[key] = { lat, lon };
+    paintSlots();
+  }
+
+  function readSlotInputs(key) {
+    const el = document.querySelector(`.slot[data-key="${key}"]`);
+    if (!el) return;
+    const lat = parseFloat(el.querySelector('input[data-f="lat"]').value);
+    const lon = parseFloat(el.querySelector('input[data-f="lon"]').value);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) points[key] = { lat, lon };
+    else delete points[key];
+    paintSlots();
+  }
+
+  function paintSlots() {
+    for (const slot of SLOTS) {
+      const el = document.querySelector(`.slot[data-key="${slot.key}"]`);
+      if (!el) continue;
+      el.classList.toggle('armed-target', slot.key === selectedSlot);
+      el.querySelector('input[name="pick"]').checked = slot.key === selectedSlot;
+      const p = points[slot.key];
+      const latIn = el.querySelector('input[data-f="lat"]');
+      const lonIn = el.querySelector('input[data-f="lon"]');
+      if (p) {
+        if (document.activeElement !== latIn) latIn.value = p.lat.toFixed(7);
+        if (document.activeElement !== lonIn) lonIn.value = p.lon.toFixed(7);
+      }
+      const state = el.querySelector('[data-o="state"]');
+      state.textContent = p ? '' : 'not set';
+      state.className = p ? 'muted' : 'muted empty';
+    }
+    const ready = SLOTS.every((s) => points[s.key]);
+    $('btn-send-plan').disabled = !admin || !ready;
+    $('plan-status').textContent = ready ? '' : 'all three waypoints needed';
+  }
+
+  function buildPlan() {
+    const waypoints = [];
+    for (const slot of SLOTS) {
+      const p = points[slot.key];
+      if (!p) return null;
+      const wp = { name: slot.key, lat: p.lat, lon: p.lon, role: slot.role };
+      if (slot.key === 'dock') {
+        const el = dockEl();
+        wp.role = dockRole();
+        const berth = el.querySelector('select[data-f="berth"]').value;
+        if (berth) wp.berth = berth;
+        const offset = parseFloat(el.querySelector('input[data-f="park_offset_m"]').value);
+        if (Number.isFinite(offset)) wp.park_offset_m = offset;
+        const hold = parseFloat(el.querySelector('input[data-f="hold_s"]').value);
+        if (Number.isFinite(hold)) wp.hold_s = hold;
+      }
+      waypoints.push(wp);
+    }
+    return { name: 'task 3 docking', waypoints };
+  }
+
+  // ----------------------------------------------------------------- figures
+
+  const FIGURES = [
+    { k: 'Speed', get: () => num(tel('motion.sog')), digits: 2, unit: 'm/s' },
+    { k: 'Battery', get: () => {
+        const soc = num(tel('battery.soc'));
+        return soc === null ? null : soc * 100;
+      }, digits: 0, unit: '%',
+      grade: (v) => (v === null ? '' : v < 15 ? 'bad' : v < 35 ? 'warn' : 'ok'),
+      sub: () => {
+        const wh = num(tel('battery.remaining_wh'));
+        const src = tel('battery.source');
+        const bits = [];
+        if (wh !== null) bits.push(`${wh.toFixed(0)} Wh`);
+        // `pixhawk` here means the CAN link to the Daly BMS dropped and this is
+        // an estimate - docs/testing.md 2. Worth saying on the tile.
+        if (src) bits.push(src === 'bms' ? 'BMS' : `${src} — estimate`);
+        return bits.join(' · ');
+      } },
+    { k: 'Heading', get: () => num(tel('motion.heading_deg')) ?? headingFromFrame(), digits: 0, unit: '°' },
+    { k: 'To waypoint', get: () => num(tel('autopilot.distance_to_waypoint')), digits: 1, unit: 'm' },
+    { k: 'Hold left', get: () => num(tel('autopilot.hold_remaining_s')), digits: 1, unit: 's',
+      grade: (v) => (v === null ? '' : 'ok') },
+    { k: 'Phase', get: () => tel('autopilot.phase') || null, text: true },
+    { k: 'Tags seen', get: () => num(tel('artags.n')) ?? 0, digits: 0,
+      grade: (v) => (v >= 2 ? 'ok' : v >= 1 ? 'warn' : 'bad') },
+    { k: 'Speed cap', get: () => num(tel('autopilot.parking.speed_cap_ms')), digits: 2, unit: 'm/s' },
+  ];
+
+  function headingFromFrame() {
+    const h = dig(snap, 'boat.heading');
+    if (Array.isArray(h) && h.length >= 2) {
+      const deg = (90 - Math.atan2(h[1], h[0]) * 180 / Math.PI + 360) % 360;
+      return deg;
+    }
+    return num(dig(snap, 'boat.heading_deg'));
+  }
+
+  function paintFigures() {
+    const host = $('figures');
+    if (!host.children.length) {
+      for (const f of FIGURES) {
+        const el = document.createElement('div');
+        el.className = 'fig';
+        el.innerHTML = `<div class="k">${f.k}</div><div class="v">—</div><div class="u"></div>`;
+        host.appendChild(el);
+      }
+    }
+    FIGURES.forEach((f, i) => {
+      const el = host.children[i];
+      const value = f.get();
+      const v = el.querySelector('.v');
+      const u = el.querySelector('.u');
+      if (value === null || value === undefined) {
+        v.textContent = '—'; u.textContent = '';
+      } else if (f.text) {
+        v.textContent = String(value); v.style.fontSize = '16px'; u.textContent = '';
+      } else {
+        v.textContent = value.toFixed(f.digits);
+        u.textContent = f.sub ? (f.sub() || (f.unit || '')) : (f.unit || '');
+      }
+      el.className = 'fig ' + (f.grade ? f.grade(value) : '');
+    });
+
+    const reason = tel('autopilot.reason');
+    $('reason-note').textContent = reason || 'the boat has not said what it is doing';
+  }
+
+  // ---------------------------------------------------------------- position
+
+  function paintPosition() {
+    const lat = num(tel('gps.lat')), lon = num(tel('gps.lon'));
+    const decimal = (lat === null || lon === null) ? '—'
+      : `${lat.toFixed(7)}, ${lon.toFixed(7)}`;
+    $('pos-decimal').textContent = decimal;
+    $('pos-dms').textContent = (lat === null || lon === null) ? '—'
+      : `${dms(lat, 'N', 'S')}   ${dms(lon, 'E', 'W')}`;
+    const bits = [];
+    const fix = tel('gps.fix');
+    if (fix) bits.push(fix);
+    const sats = num(tel('gps.satellites'));
+    if (sats !== null) bits.push(`${sats} sats`);
+    const hdop = num(tel('gps.hdop'));
+    if (hdop !== null) bits.push(`HDOP ${hdop.toFixed(2)}`);
+    $('pos-extra').textContent = bits.join(' · ');
+  }
+
+  // -------------------------------------------------------------------- tags
+
+  function paintTags() {
+    const block = tel('artags');
+    const summary = $('tag-summary');
+    const body = $('tag-table').querySelector('tbody');
+    body.innerHTML = '';
+
+    if (!block) {
+      // The distinction the wire keeps on purpose: no `tags` field at all means
+      // nothing on the boat is looking, which is a different fault from looking
+      // and seeing nothing, and it needs a different fix.
+      summary.innerHTML = '<div class="note bad">The vessel is not reporting AR tags '
+        + 'at all. Either <code>sender.py</code> is running without '
+        + '<code>--artags</code>, or <code>cv2.aruco</code> is missing on the Jetson, '
+        + 'or the autonomy node is not up. Check the Jetson\'s console: it prints '
+        + '<b>AR tags on</b> with the search window at start-up, or a warning saying '
+        + 'why not.</div>';
+      $('berth-block').innerHTML = '';
+      return;
+    }
+
+    const tags = Array.isArray(block.tags) ? block.tags : [];
+    if (!block.searching) {
+      summary.innerHTML = '<div class="note bad">The Jetson is connected but is not '
+        + 'searching for tags — restart <code>sender.py</code> with '
+        + '<code>--artags</code>.</div>';
+    } else if (!tags.length) {
+      summary.innerHTML = '<div class="note warn">Looking, and no tag is in view. '
+        + 'An 18 cm tag is about 53 px at 3 m and 20 px at 8 m, so get closer and '
+        + 'point the bow at the berth.</div>';
+    } else {
+      const ids = [...new Set(tags.map((t) => t.id))].sort((a, b) => a - b);
+      summary.innerHTML = `<div class="note ok">${tags.length} sighting(s), ids `
+        + ids.map((i) => `<span class="tagchip">${i}</span>`).join(' ') + '</div>';
+    }
+
+    for (const t of tags.slice().sort((a, b) => (a.range_m || 0) - (b.range_m || 0))) {
+      const tr = document.createElement('tr');
+      // Under ~20 px the marker is at the edge of being decodable at all, and its
+      // range error is growing as the square of the distance.
+      if ((t.edge_px || 0) < 20) tr.className = 'dim';
+      tr.innerHTML = `<td><span class="tagchip">${t.id}</span></td>`
+        + `<td>${t.cam ?? '—'}</td>`
+        + `<td>${num(t.range_m) === null ? '—' : t.range_m.toFixed(2) + ' m'}</td>`
+        + `<td>${num(t.bearing_deg) === null ? '—' : (t.bearing_deg > 0 ? '+' : '') + t.bearing_deg.toFixed(0) + '°'}</td>`
+        + `<td>${num(t.edge_px) === null ? '—' : t.edge_px.toFixed(0)}</td>`
+        + `<td>${num(t.incidence_deg) === null ? '—' : t.incidence_deg.toFixed(0) + '°'}</td>`;
+      body.appendChild(tr);
+    }
+
+    paintBerth();
+  }
+
+  function paintBerth() {
+    const p = tel('autopilot.parking');
+    const host = $('berth-block');
+    if (!p) { host.innerHTML = '<div class="muted">No docking behaviour running.</div>'; return; }
+
+    if (!p.seen) {
+      const why = (p.tags && p.tags.why) || 'nothing found yet';
+      host.innerHTML = `<div class="note warn"><b>No berth yet.</b> ${escapeHtml(why)}</div>`;
+      return;
+    }
+
+    const rows = [
+      ['Berth', p.berth || (p.tags && p.tags.berth) || '—'],
+      ['Occupancy', p.occupancy || (p.tags && p.tags.occupancy) || '—'],
+      ['Geometry from', p.axis_source || (p.tags && p.tags.axis_source) || '—'],
+      ['Mouth measured', p.mouth_m === null || p.mouth_m === undefined ? 'not measured'
+        : `${Number(p.mouth_m).toFixed(2)} m`],
+      ['Depth', `${Number(p.depth_m || 0).toFixed(2)} m (${p.depth_source || '—'})`],
+      ['Way in', `${Number(p.into_deg || 0).toFixed(0)}°`],
+      ['Sensor', p.sensor || '—'],
+      ['Source', p.source || '—'],
+    ];
+    let html = '<table class="kv">';
+    for (const [k, v] of rows) {
+      html += `<tr><td class="k">${k}</td><td class="v">${escapeHtml(String(v))}</td></tr>`;
+    }
+    html += '</table>';
+
+    const why = (p.tags && p.tags.why) || p.why;
+    if (why) html += `<div class="note ok">${escapeHtml(why)}</div>`;
+    // The live form of the camera-yaw check: the two side tags of a 2 m berth land
+    // one in each camera, so a berth that measures the wrong width is rig.json's
+    // +-75 deg yaws being wrong. See ligmax-edge/artags.py.
+    const nominal = num(p.mouth_nominal_m) ?? num(p.tags && p.tags.span_nominal_m);
+    const measured = num(p.mouth_m);
+    if (nominal !== null && measured !== null && Math.abs(measured - nominal) > 0.25) {
+      html += `<div class="note warn">The mouth measures ${measured.toFixed(2)} m `
+        + `against a nominal ${nominal.toFixed(2)} m. The two side tags land one in `
+        + `each camera, so this is usually <code>rig.json</code>'s camera yaws being `
+        + `wrong rather than the dock. The <b>middle</b> of the two tags is `
+        + `unaffected, so the boat is still aiming at the right spot.</div>`;
+    }
+    if (p.tags && p.tags.cross_cam_warning) {
+      html += `<div class="note warn">${escapeHtml(p.tags.cross_cam_warning)}</div>`;
+    }
+    if (p.hold_warning) html += `<div class="note warn">${escapeHtml(p.hold_warning)}</div>`;
+    host.innerHTML = html;
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  // ------------------------------------------------------------------- chart
+
+  // Metres per degree of latitude, and of longitude at this latitude. Only ever
+  // used over a few tens of metres of dock, where a flat approximation is good to
+  // millimetres - the vessel does the real conversion against its own origin.
+  const M_PER_DEG_LAT = 111320.0;
+  function mPerDegLon(lat) { return 111320.0 * Math.cos(lat * Math.PI / 180); }
+
+  /** lat/lon -> grid metres against the frame's origin, or null. */
+  function toGrid(lat, lon) {
+    const origin = dig(snap, 'origin');
+    if (!origin || num(origin.lat) === null || num(origin.lon) === null) return null;
+    return [
+      (lon - origin.lon) * mPerDegLon(origin.lat),
+      (lat - origin.lat) * M_PER_DEG_LAT,
+    ];
+  }
+
+  /** grid metres -> lat/lon, for placing a waypoint by clicking. */
+  function toGlobal(x, y) {
+    const origin = dig(snap, 'origin');
+    if (!origin) return null;
+    return {
+      lat: origin.lat + y / M_PER_DEG_LAT,
+      lon: origin.lon + x / mPerDegLon(origin.lat),
+    };
+  }
+
+  let view = { cx: 0, cy: 0, span: 40 };   // grid metres
+
+  function paintChart() {
+    const cv = $('chart');
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const boat = dig(snap, 'boat.position');
+    const wpGrid = {};
+    for (const slot of SLOTS) {
+      const p = points[slot.key];
+      if (p) { const g = toGrid(p.lat, p.lon); if (g) wpGrid[slot.key] = g; }
+    }
+
+    // Frame the view on everything there is: the boat, the waypoints and the
+    // berth. Without a fix and without an origin there is nothing to frame, and
+    // the chart says so rather than drawing an empty grid that looks live.
+    const pts = [];
+    if (Array.isArray(boat)) pts.push(boat);
+    for (const g of Object.values(wpGrid)) pts.push(g);
+    const parking = tel('autopilot.parking');
+    if (parking && parking.seen && Array.isArray(parking.corners)) {
+      for (const c of parking.corners) if (Array.isArray(c)) pts.push(c);
+    }
+    if (!pts.length) {
+      ctx.fillStyle = '#7d8ea8';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('no grid origin and no position yet — the chart needs a GNSS fix',
+                   W / 2, H / 2);
+      ctx.textAlign = 'left';
+      $('chart-scale').textContent = '';
+      return;
+    }
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const pad = 8;
+    const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+    const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+    view.cx = (minX + maxX) / 2;
+    view.cy = (minY + maxY) / 2;
+    view.span = Math.max(maxX - minX, maxY - minY, 16);
+
+    const scale = W / view.span;                 // px per metre
+    const sx = (x) => W / 2 + (x - view.cx) * scale;
+    const sy = (y) => H / 2 - (y - view.cy) * scale;
+    $('chart-scale').textContent = `${view.span.toFixed(0)} m across · north is up`;
+
+    // grid
+    const step = view.span > 80 ? 20 : view.span > 40 ? 10 : view.span > 16 ? 5 : 1;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#101a2b';
+    ctx.fillStyle = '#2c3c56';
+    ctx.font = '10px ui-monospace, monospace';
+    for (let g = Math.ceil(minX / step) * step; g <= maxX; g += step) {
+      ctx.beginPath(); ctx.moveTo(sx(g), 0); ctx.lineTo(sx(g), H); ctx.stroke();
+    }
+    for (let g = Math.ceil(minY / step) * step; g <= maxY; g += step) {
+      ctx.beginPath(); ctx.moveTo(0, sy(g)); ctx.lineTo(W, sy(g)); ctx.stroke();
+      ctx.fillText(`${g} m`, 3, sy(g) - 3);
+    }
+
+    // trail
+    if (trail.length > 1) {
+      ctx.strokeStyle = '#22384f';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      trail.forEach((p, i) => (i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1]))));
+      ctx.stroke();
+    }
+
+    // the planned legs
+    const order = SLOTS.map((s) => wpGrid[s.key]).filter(Boolean);
+    if (order.length > 1) {
+      ctx.strokeStyle = '#4a4020';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      order.forEach((p, i) => (i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1]))));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // the berth, drawn as the open U it is: the way in is left open on purpose.
+    if (parking && parking.seen && Array.isArray(parking.corners) && parking.corners.length === 4) {
+      const c = parking.corners;
+      ctx.strokeStyle = '#4fd07a';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(sx(c[0][0]), sy(c[0][1]));
+      for (let i = 1; i < 4; i++) ctx.lineTo(sx(c[i][0]), sy(c[i][1]));
+      ctx.stroke();
+      if (Array.isArray(parking.target)) {
+        const t = parking.target;
+        ctx.fillStyle = '#4fd07a';
+        ctx.beginPath();
+        ctx.arc(sx(t[0]), sy(t[1]), 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // waypoints
+    SLOTS.forEach((slot, i) => {
+      const g = wpGrid[slot.key];
+      if (!g) return;
+      const selected = slot.key === selectedSlot;
+      ctx.fillStyle = selected ? '#ffd479' : '#f0b23c';
+      ctx.beginPath();
+      ctx.arc(sx(g[0]), sy(g[1]), selected ? 8 : 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#0a0f19';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(i + 1), sx(g[0]), sy(g[1]) + 4);
+      ctx.textAlign = 'left';
+    });
+
+    // the boat, and the tags hung off its pose
+    if (Array.isArray(boat)) {
+      const hdg = headingFromFrame();
+      const rad = hdg === null ? 0 : hdg * Math.PI / 180;
+      // Tags arrive boat-relative, [starboard, forward], exactly like a lidar
+      // sweep - so they are rotated onto the chart here rather than on the boat.
+      const block = tel('artags');
+      if (block && Array.isArray(block.tags)) {
+        for (const t of block.tags) {
+          if (!Array.isArray(t.point)) continue;
+          const [stbd, fwd] = t.point;
+          const east = boat[0] + stbd * Math.cos(rad) + fwd * Math.sin(rad);
+          const north = boat[1] - stbd * Math.sin(rad) + fwd * Math.cos(rad);
+          ctx.fillStyle = '#eb64eb';
+          ctx.beginPath();
+          ctx.moveTo(sx(east), sy(north) - 6);
+          ctx.lineTo(sx(east) + 5, sy(north) + 4);
+          ctx.lineTo(sx(east) - 5, sy(north) + 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#f7b8f7';
+          ctx.font = '10px ui-monospace, monospace';
+          ctx.fillText(String(t.id), sx(east) + 7, sy(north) + 3);
+        }
+      }
+      ctx.save();
+      ctx.translate(sx(boat[0]), sy(boat[1]));
+      ctx.rotate(rad);
+      ctx.fillStyle = '#7fd4ff';
+      ctx.beginPath();
+      ctx.moveTo(0, -11); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      const remaining = num(tel('autopilot.hold_remaining_s'));
+      if (remaining !== null) {
+        ctx.fillStyle = '#4fd07a';
+        ctx.font = 'bold 15px ui-monospace, monospace';
+        ctx.fillText(`${remaining.toFixed(1)} s`, sx(boat[0]) + 14, sy(boat[1]) - 10);
+      }
+    }
+  }
+
+  $('chart').addEventListener('click', (ev) => {
+    const cv = $('chart');
+    const rect = cv.getBoundingClientRect();
+    const scale = cv.width / view.span;
+    const px = (ev.clientX - rect.left) * (cv.width / rect.width);
+    const py = (ev.clientY - rect.top) * (cv.height / rect.height);
+    const x = view.cx + (px - cv.width / 2) / scale;
+    const y = view.cy - (py - cv.height / 2) / scale;
+    const ll = toGlobal(x, y);
+    if (!ll) { toast('no grid origin yet — the chart cannot be clicked', 'bad'); return; }
+    setPoint(selectedSlot, ll.lat, ll.lon);
+  });
+
+  // ----------------------------------------------------------------- cameras
+
+  function paintCameras(state) {
+    const stream = (state && state.stream) || {};
+    videoOn = !!stream.enabled;
+    $('btn-video').textContent = videoOn ? 'Turn video off' : 'Turn video on';
+    const bits = [videoOn ? 'on' : 'off'];
+    if (stream.max_width) bits.push(`${stream.max_width} px`);
+    if (stream.fps) bits.push(`${stream.fps} fps`);
+    const caps = state && state.caps;
+    if (caps && !String(caps).includes('artag')) {
+      bits.push('the Jetson\'s build cannot find tags — git pull and restart sender.py');
+    }
+    $('cam-status').textContent = bits.join(' · ');
+
+    for (const cam of ['0', '1']) {
+      const info = (state && state.cameras && state.cameras[cam]) || null;
+      const age = info && num(info.age_s);
+      $(`cam${cam}-age`).textContent = age === null || age === undefined
+        ? 'no frame' : `${age.toFixed(1)} s ago`;
+    }
+    if (videoOn) {
+      for (const cam of ['0', '1']) {
+        // Cache-busted per poll rather than an MJPEG stream: one <img> per frame
+        // is what the existing /api/camera/<cam>.jpg serves, and it degrades
+        // gracefully when a frame is missing instead of hanging a connection.
+        $(`cam${cam}`).src = `/api/camera/${cam}.jpg?t=${Date.now()}`;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------- poll
+
+  function paintHeader() {
+    const status = dig(snap, 'status') || '—';
+    const pill = $('pill-status');
+    pill.textContent = status;
+    pill.className = 'pill ' + (
+      status === 'AUTONOMOUS' ? 'ok'
+      : status === 'KILLED' || status === 'OUT_OF_CONTROL' ? 'bad'
+      : status === 'REMOTE' ? 'warn' : '');
+    $('pill-mode').textContent = `mode ${dig(snap, 'mode') || '—'}`
+      + (dig(snap, 'armed') ? ' · armed' : ' · disarmed');
+    const fix = tel('gps.fix') || '—';
+    const fixPill = $('pill-fix');
+    fixPill.textContent = `fix ${fix}`;
+    fixPill.className = 'pill ' + (
+      /RTK_FIX|FIXED/.test(fix) ? 'ok' : /RTK_FLOAT|3D|DGPS/.test(fix) ? 'warn' : 'bad');
+
+    const block = tel('artags');
+    const tagPill = $('pill-tags');
+    if (!block) { tagPill.textContent = 'tags not reported'; tagPill.className = 'pill bad'; }
+    else if (!block.searching) { tagPill.textContent = 'not searching'; tagPill.className = 'pill bad'; }
+    else {
+      const n = block.n || 0;
+      tagPill.textContent = `${n} tag${n === 1 ? '' : 's'}`;
+      tagPill.className = 'pill ' + (n >= 2 ? 'ok' : n ? 'warn' : 'warn');
+    }
+
+    const age = lastFrameAt ? (Date.now() - lastFrameAt) / 1000 : null;
+    const linkPill = $('pill-link');
+    linkPill.textContent = age === null ? 'no data' : `${age.toFixed(1)} s`;
+    linkPill.className = 'pill ' + (age === null || age > 5 ? 'bad' : age > 2 ? 'warn' : 'ok');
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/snapshot', { credentials: 'same-origin' });
+      if (res.ok) {
+        snap = await res.json();
+        lastFrameAt = Date.now();
+        const boat = dig(snap, 'boat.position');
+        if (Array.isArray(boat)) {
+          const last = trail[trail.length - 1];
+          if (!last || Math.hypot(boat[0] - last[0], boat[1] - last[1]) > 0.25) {
+            trail.push([boat[0], boat[1]]);
+            if (trail.length > 600) trail.shift();
+          }
+        }
+      }
+    } catch (e) { /* a poll that fails is shown by the link pill going red */ }
+
+    try {
+      const res = await fetch('/api/camera/state', { credentials: 'same-origin' });
+      if (res.ok) paintCameras(await res.json());
+    } catch (e) { /* as above */ }
+
+    paintHeader();
+    paintFigures();
+    paintPosition();
+    paintTags();
+    paintChart();
+    paintSlots();
+  }
+
+  async function loadSession() {
+    try {
+      const res = await fetch('/api/session', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      session = await res.json();
+      admin = !!session.admin;
+      $('pill-admin').textContent = admin ? 'admin' : 'read only';
+      $('pill-admin').className = 'pill ' + (admin ? 'ok' : '');
+      for (const el of document.querySelectorAll('.admin-only')) el.disabled = !admin;
+      const limits = (session.waypoint_limits || {}).speed;
+      if (limits) {
+        $('speed-input').min = limits.min;
+        $('speed-input').max = limits.max;
+      }
+    } catch (e) { /* the page still reads; every control stays disabled */ }
+  }
+
+  // ------------------------------------------------------------------ wiring
+
+  $('btn-copy').addEventListener('click', () => copy($('pos-decimal').textContent, 'position'));
+  $('btn-copy-lat').addEventListener('click', () => {
+    const lat = num(tel('gps.lat'));
+    copy(lat === null ? '—' : lat.toFixed(7), 'latitude');
+  });
+  $('btn-copy-lon').addEventListener('click', () => {
+    const lon = num(tel('gps.lon'));
+    copy(lon === null ? '—' : lon.toFixed(7), 'longitude');
+  });
+
+  $('btn-load-njord').addEventListener('click', () => {
+    for (const slot of SLOTS) setPoint(slot.key, NJORD[slot.preset].lat, NJORD[slot.preset].lon);
+    toast('loaded the handed-out GPS 7, 8 and 9', 'ok');
+  });
+  $('btn-clear-all').addEventListener('click', () => {
+    for (const slot of SLOTS) delete points[slot.key];
+    paintSlots();
+  });
+
+  $('btn-send-plan').addEventListener('click', async () => {
+    const plan = buildPlan();
+    if (!plan) { toast('all three waypoints are needed', 'bad'); return; }
+    await run('Plan', 'set_plan', { plan });
+  });
+  $('btn-arm').addEventListener('click', () => run('Arm', 'arm', {}));
+  $('btn-start').addEventListener('click', () => run('Engage autonomy', 'autopilot_start', {}));
+  $('btn-stop').addEventListener('click', () => run('Disengage', 'autopilot_stop', {}));
+  $('btn-estop').addEventListener('click', () => {
+    if (!confirm('EMERGENCY STOP — cut propulsion now?')) return;
+    run('E-stop', 'estop', {});
+  });
+  $('btn-speed').addEventListener('click', () => {
+    const value = parseFloat($('speed-input').value);
+    if (!Number.isFinite(value)) { toast('speed is not a number', 'bad'); return; }
+    run('Speed limit', 'set_speed_limit', { value });
+  });
+
+  $('btn-video').addEventListener('click', async () => {
+    if (!admin) return;
+    try { await configureCameras(!videoOn); }
+    catch (err) { toast(`camera: ${err.message}`, 'bad'); }
+  });
+  async function configureCameras(enabled) {
+    await fetch('/api/camera/config', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled,
+        max_width: parseInt($('cam-width').value, 10),
+        fps: parseInt($('cam-fps').value, 10),
+        cameras: ['0', '1'],
+      }),
+    });
+  }
+
+  for (const id of ['cam-width', 'cam-fps']) {
+    // Re-send the config at the new size rather than toggling video off and on:
+    // the Jetson reads size and fps off the same poll reply it reads `enabled`
+    // from, so one POST is enough and a toggle would drop frames for a poll period.
+    $(id).addEventListener('change', async () => {
+      if (!admin || !videoOn) return;
+      try { await configureCameras(true); }
+      catch (err) { toast(`camera: ${err.message}`, 'bad'); }
+    });
+  }
+
+  (async () => {
+    await loadSession();
+    buildSlots();
+    await poll();
+    setInterval(poll, POLL_MS);
+  })();
+})();
+</script>

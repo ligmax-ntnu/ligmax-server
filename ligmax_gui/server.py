@@ -1304,6 +1304,29 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
     # guarantee; keeping this off the page a marshal is actually looking at is
     # the second one.
 
+    @app.get("/dock")
+    def dock() -> Response:
+        """Task 3 and nothing else: the AR tags, three waypoints, and the cameras.
+
+        A fifth page, same treatment as `/led_control` and `/debug/lidar_viz`: read
+        gate like every other page, admin gate per command, and self-contained so
+        that a change to the main dashboard's frontend cannot break the one page
+        somebody is standing on a pontoon using.
+
+        It exists because the docking task needs almost nothing the overview shows
+        and one thing it does not: the boat's own latitude and longitude, large
+        enough to read and with a button that copies it, because the middle waypoint
+        of Task 3 is laid by driving the boat to a spot where the berth is actually
+        in view and pinning it there.
+        """
+        if (response := consume_key_param(url_for("dock"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "dock.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/led_control")
     def led_control() -> Response:
         if (response := consume_key_param(url_for("led_control"))) is not None:
