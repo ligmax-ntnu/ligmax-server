@@ -2060,10 +2060,12 @@
 
 .ap-sees:empty { display: none; }
 
-/* The speed ceiling and its toggle. Quiet at the ordinary limit and loud in
-   careful mode, because "the boat is inexplicably slow" is a misdiagnosis this
-   line exists to prevent — it has to be the thing you notice, not a field you
-   have to go looking for. */
+/* The speed in force. Quiet at the ordinary setting and loud when the boat has
+   been turned down, because "the boat is inexplicably slow" is a misdiagnosis
+   this line exists to prevent — it has to be the thing you notice, not a field
+   you have to go looking for. The `data-careful` attribute keeps its name: it is
+   the same "somebody set this and forgot" state, now that one speed setting has
+   replaced careful mode and the profiles. */
 .ap-speed {
   display: flex;
   align-items: center;

@@ -13,7 +13,7 @@ const HOLD_MS = 800;
 
 // The speed cap's bounds, mirroring server.py's MIN/MAX_SPEED_LIMIT_MS and
 // ligmax-pi/nodes/io_manager/guided.py. NJORD's 5 knots is the ceiling.
-const MIN_SPEED_MS = 0.2;
+const MIN_SPEED_MS = 0.1;
 const MAX_SPEED_MS = 5.0 * 0.514444;
 
 // Hold and Resume used to head this list. They were never implemented on the
@@ -158,13 +158,19 @@ export class CommandPanel {
   }
 
   /**
-   * The go-to / AUTO speed cap, in m/s.
+   * **The one speed**, in m/s.
+   *
+   * It is the go-to speed, the AUTO mission speed, and the autonomy node's own
+   * setting — what it runs a leg at and the ceiling every behaviour plans under,
+   * docking included. One press reaches both nodes on the vessel
+   * (`autopilot_bridge.SHARED_COMMANDS`), and careful mode and the run profiles
+   * are gone because this replaced them.
    *
    * Bounded here, on the server and on the vessel by the same pair of numbers —
-   * 0.2 m/s to the 5 kn vessel limit — and refused rather than clamped at every
-   * one of the three, because a cap that silently becomes a different cap is
-   * worse than a rejected one. This is not the autopilot's careful-mode ceiling;
-   * that is on the autonomy panel and this button does not touch it.
+   * 0.1 m/s to the 5 kn vessel limit — and refused rather than clamped at every
+   * one of the three, because a speed that silently becomes a different speed is
+   * worse than a rejected one. The floor is 0.1 so a first parking attempt can be
+   * run at a crawl.
    */
   _bindSpeed() {
     this.elements.speedApply?.addEventListener('click', () => {

@@ -213,7 +213,10 @@ class Sim:
         self.estop = False
         self.waypoint_index = 0
         self.goto: tuple[float, float] | None = None
-        self.speed_limit = 3.2
+        self.speed_limit = 1.2
+        # The cardinal alternation prior, the one switch the autopilot panel still
+        # has now that careful mode and the run profiles are gone.
+        self.alternation = False
         self.armed = True
         self.soc = 0.94
         self.consumed_wh = 0.0
@@ -655,6 +658,16 @@ class Sim:
                 "engaged": self.autopilot_engaged,
                 "intent": "goto" if mode == "RUNNING" else "hold",
                 "speed_cmd": round(self.speed, 2),
+                # The one speed setting, which the autopilot panel reads. Same
+                # figure `set_speed_limit` set, because on the real vessel it is
+                # the same command reaching both nodes
+                # (ligmax-pi/nodes/io_manager/autopilot_bridge.py).
+                "speed_ms": round(self.speed_limit, 3),
+                "speed_kn": round(self.speed_limit / 0.514444, 2),
+                "speed_ceiling_ms": round(self.speed_limit, 3),
+                "speed_ceiling_kn": round(self.speed_limit / 0.514444, 2),
+                "speed_limit_kn": 5.0,
+                "alternation": self.alternation,
             },
             "recording": (
                 {"recording": True, "file": "sim-run.jsonl.gz"}
@@ -922,7 +935,7 @@ class Sim:
             # a boat that would go faster than one, so it clamps to the same
             # ceiling. The server refuses out-of-range values before either of us
             # sees them anyway.
-            self.speed_limit = clamp(float(args.get("value", 2.0)), 0.2, 5.0 * 0.514444)
+            self.speed_limit = clamp(float(args.get("value", 2.0)), 0.1, 5.0 * 0.514444)
             return "acked", (
                 f"speed limit {self.speed_limit:.2f} m/s "
                 f"({self.speed_limit / 0.514444:.2f} kn)"
@@ -981,6 +994,15 @@ class Sim:
         if name == "autopilot_resume":
             self.autopilot_paused = False
             return "acked", "carrying on"
+        if name == "alternation":
+            # The one switch left on the autopilot panel. Acked off what the sim
+            # holds rather than off the argument, so the panel's chip is rendered
+            # from the boat's answer the way it is on the real vessel.
+            self.alternation = bool(args.get("on", True))
+            return "acked", (
+                "alternation prior ON" if self.alternation
+                else "alternation prior OFF"
+            )
         if name == "autopilot_skip":
             self.plan_index = min(self.plan_index + 1, len(ROUTE_ROLES) - 1)
             self.waypoint_index = min(self.waypoint_index + 1, len(WAYPOINTS) - 1)

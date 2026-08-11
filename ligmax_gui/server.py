@@ -84,7 +84,11 @@ MAX_LIGHTS_FPS = 60.0
 # repo's config.py, the number the vessel enforces and no dashboard can raise.
 # Refused here as well as there so an operator who types 4 is told immediately
 # instead of watching the row come back "failed" a second later.
-MIN_SPEED_LIMIT_MS = 0.2
+#
+# The floor was 0.2 until 2026-08-11 and is 0.1 now, because this figure is also
+# the autonomy node's speed (see the command spec below) and a first parking
+# attempt on the water is run at 0.1 m/s.
+MIN_SPEED_LIMIT_MS = 0.1
 MAX_SPEED_LIMIT_MS = 5.0 * 0.514444  # 2.5722 m/s
 
 # Commands the dashboard is allowed to forward.  An allow-list, so a stray
@@ -129,13 +133,23 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # a route and setting it moving are always two distinct, audited commands.
     "set_mission": {"label": "Send mission", "args": {"points": "any"}, "confirm": True},
     "clear_waypoints": {"label": "Clear waypoints", "args": {}},
-    # The ground speed a `goto` travels at, in m/s, and - because the vessel
-    # sends it on as DO_CHANGE_SPEED - the speed an AUTO mission runs at too.
+    # **The one speed.** The ground speed a `goto` travels at, the speed an AUTO
+    # mission runs at (the vessel sends it on as DO_CHANGE_SPEED), and - since
+    # 2026-08-11 - the autonomy node's own setting: what it runs a leg at and the
+    # ceiling every behaviour plans under, docking included. One press, both
+    # nodes: `autopilot_bridge.SHARED_COMMANDS` on the vessel is what makes that
+    # true, and `autopilot.commander.speed_kn` is the vessel's own answer for what
+    # is in force.
+    #
+    # Careful mode and `run_profile` used to live here as well and are gone. They
+    # were three ways of saying "how fast may the boat go" and `run_profile` never
+    # even reached the vessel - it was not in the forwarding list, so every press
+    # acked "not implemented".
+    #
     # Bounded above by NJORD's 5 knots (MAX_SPEED_LIMIT_MS), which nothing from
-    # here can raise. It is NOT the autonomy node's ceiling: that is careful mode
-    # and rides up as `autopilot.commander.speed_ceiling_kn`, shown separately on
-    # the autopilot panel. Logged at WARN for the same reason a gain is - a boat
-    # that is suddenly slower is a thing somebody will come looking for.
+    # here can raise, and below by MIN_SPEED_LIMIT_MS. Logged at WARN for the same
+    # reason a gain is - a boat that is suddenly slower is a thing somebody will
+    # come looking for.
     "set_speed_limit": {
         "label": "Speed limit",
         "args": {"value": "float"},
@@ -170,7 +184,7 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # back to the receiver, and if the transmitter has it parked off centre,
     # letting go is what STARTS the creep. Two irreversible-ish actions that
     # differ that sharply get two buttons and two audit entries, the same split
-    # `careful_on`/`careful_off` and `set_mission`/`arm` already use.
+    # `set_mission`/`arm` and `estop`/`estop_clear` already use.
     "set_ride_height": {
         "label": "Move amas (hold to travel)",
         "args": {"pwm": "float"},
@@ -308,34 +322,12 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # machinery; the vessel accepts `id` or `track_id` and suppresses that spot
     # for 30 s so a phantom does not come straight back.
     "forget_object": {"label": "Delete this object", "args": {"id": "float"}},
-    # Careful mode: a 1 knot ceiling the operator can drop to and release while
-    # the boat is running, for a first pass down an unfamiliar course. It takes
-    # effect on the next tick and does not interrupt the run, which is why these
-    # are two plain commands rather than anything that stops and restarts.
+    # `careful_on`, `careful_off` and `run_profile` were here until 2026-08-11.
+    # All three said "how fast may the boat go" and `set_speed_limit` above now
+    # says it once, for both nodes and for docking as well; `run_profile` had also
+    # never worked, since the vessel did not forward it. Nothing replaced them -
+    # that is the point.
     #
-    # They are a pair rather than one toggle with an argument because the state
-    # already rides up in the telemetry (`autopilot.commander.careful`), so the
-    # dashboard renders a toggle from what the boat says is true rather than from
-    # what it last sent - the two disagree exactly when it matters, after a
-    # dropped command.
-    "careful_on": {"label": "Careful mode (1 kn)", "args": {}, "log_level": "WARN"},
-    "careful_off": {"label": "Normal speed", "args": {}, "log_level": "WARN"},
-    # The run profile, which is careful mode generalised - see
-    # ligmax-pi/nodes/self_driving/profiles.py. NJORD gives two attempts at each
-    # subtask and the marks do not move between them, so the attempts are
-    # different problems: `survey` is a 1 kn pass whose product is the map, `fast`
-    # drives off that map at up to the 5 kn vessel limit. `survey` and
-    # `careful_on` are the same state under two names, and the pair above is kept
-    # because the older dashboard build sends it.
-    #
-    # The name is validated below rather than only at the vessel: a typo at 09:00
-    # should come back on the console immediately, not sit at "sent" and return
-    # "failed" a second later while somebody wonders which of the two they mistyped.
-    "run_profile": {
-        "label": "Run profile",
-        "args": {"profile": "str"},
-        "log_level": "WARN",
-    },
     # The cardinal alternation prior. Off by default and deliberately so - it is
     # an inference from how marks are laid, not a measurement, and switching it on
     # is a decision somebody makes knowing that. WARN because "why did it pick
@@ -352,12 +344,6 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # `hold` and `resume`, whose modern equivalents are `autopilot_pause` and
     # `autopilot_resume` above (docs/findings.md).
 }
-
-#: The profiles `run_profile` will accept, mirrored from
-#: ligmax-pi/nodes/self_driving/profiles.py. Mirrored rather than imported for the
-#: same reason `tuning.py` mirrors the vessel's parameter table: this process does
-#: not import the boat's code and must not start.
-RUN_PROFILES = ("survey", "normal", "fast")
 
 _FAILED_ATTEMPT_LIMIT = 8
 _FAILED_ATTEMPT_WINDOW = 300.0
@@ -1066,19 +1052,6 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 return jsonify(  # type: ignore[return-value]
                     {"error": f"mode '{cleaned['mode']}' not offered by the vessel"}
                 ), 400
-
-        if name == "run_profile":
-            wanted = str(cleaned.get("profile", "")).strip().lower()
-            if wanted not in RUN_PROFILES:
-                return jsonify(  # type: ignore[return-value]
-                    {
-                        "error": (
-                            f"'{wanted}' is not a run profile - "
-                            f"pick one of {', '.join(RUN_PROFILES)}"
-                        )
-                    }
-                ), 400
-            cleaned["profile"] = wanted
 
         if name == "alternation":
             cleaned["on"] = bool(cleaned.get("on"))

@@ -85,22 +85,22 @@ def test_command_specs():
     section("the command allow-list")
     client = _admin_client()
 
-    # The three added for the autonomy node's newer commands (next_step.md §2.1,
-    # §2.6). Their absence is what the dashboard could not send.
-    for name in ("careful_on", "careful_off", "forget_object"):
+    # The autonomy node's own commands. Their absence is what the dashboard could
+    # not send (next_step.md §2.1, §2.6).
+    for name in ("set_speed_limit", "alternation", "forget_object"):
         check(name in COMMAND_SPECS, f"{name} is on the allow-list")
 
     check(
-        COMMAND_SPECS["careful_on"]["args"] == {},
-        "careful_on takes no arguments - it is a state, not a value",
+        COMMAND_SPECS["set_speed_limit"]["args"] == {"value": "float"},
+        "set_speed_limit takes one speed in m/s - it is the only speed control",
     )
     check(
         COMMAND_SPECS["forget_object"]["args"] == {"id": "float"},
         "forget_object takes the track id the chart drew",
     )
 
-    ok = client.post("/api/command", json={"name": "careful_on", "args": {}})
-    check(ok.status_code == 200, f"careful_on is accepted ({ok.status_code})")
+    ok = client.post("/api/command", json={"name": "alternation", "args": {"on": True}})
+    check(ok.status_code == 200, f"alternation is accepted ({ok.status_code})")
 
     ok = client.post("/api/command", json={"name": "forget_object", "args": {"id": 7}})
     check(ok.status_code == 200, f"forget_object with a real id is accepted ({ok.status_code})")
@@ -179,6 +179,14 @@ def test_command_specs():
         "/api/command", json={"name": "set_speed_limit", "args": {"value": MAX_SPEED_LIMIT_MS}}
     )
     check(r.status_code == 200, "the vessel limit itself is accepted")
+    r = client.post(
+        "/api/command", json={"name": "set_speed_limit", "args": {"value": 0.1}}
+    )
+    check(
+        r.status_code == 200,
+        f"0.1 m/s is accepted - it is what a first parking attempt runs at "
+        f"({r.status_code})",
+    )
     for bad in (4.0, 0.05, float("nan"), float("inf")):
         r = client.post(
             "/api/command", json={"name": "set_speed_limit", "args": {"value": bad}}
@@ -202,19 +210,25 @@ def test_command_specs():
     # `raw` aimed an arbitrary payload at the vessel, which is the one thing this
     # allow-list exists to prevent. All three used to render as working buttons
     # and ack "not implemented" a second later (findings.md item 34).
-    for gone in ("hold", "resume", "raw"):
+    # Careful mode and the run profiles went the same way on 2026-08-11: three
+    # controls for "how fast may the boat go" where `set_speed_limit` now does the
+    # whole job, for both nodes and for docking as well. `run_profile` had never
+    # worked at all - the vessel did not forward it.
+    for gone in ("hold", "resume", "raw", "careful_on", "careful_off", "run_profile"):
         check(gone not in COMMAND_SPECS, f"{gone} is no longer advertised")
         r = client.post("/api/command", json={"name": gone, "args": {}})
         check(r.status_code == 400, f"{gone} is refused outright ({r.status_code})")
 
     # Still an allow-list. This is the property that makes a stray fetch() from a
     # browser console unable to invent vessel behaviour.
-    r = client.post("/api/command", json={"name": "careful_maybe", "args": {}})
+    r = client.post("/api/command", json={"name": "go_faster", "args": {}})
     check(r.status_code == 400, "an unknown command is still refused")
 
     # And still admin-gated.
-    r = _client().post("/api/command", json={"name": "careful_on", "args": {}})
-    check(r.status_code == 403, "a read-only session cannot send careful_on")
+    r = _client().post(
+        "/api/command", json={"name": "set_speed_limit", "args": {"value": 1.0}}
+    )
+    check(r.status_code == 403, "a read-only session cannot set the speed")
 
 
 # ------------------------------------------------------------------ trips

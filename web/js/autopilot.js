@@ -156,83 +156,32 @@ export class AutopilotPanel {
 
     root.append(headline, this._reason, this._blocked);
 
-    // -- the speed ceiling ------------------------------------------------
+    // -- the speed in force ------------------------------------------------
     //
     // Second most-misdiagnosed thing on this boat under time pressure, after
-    // "why will it not engage": a boat that is inexplicably slow. Careful mode
-    // is a 1 kn ceiling somebody set two minutes ago and forgot, and without
-    // this line the only symptom is a boat that crawls. So the ceiling in force
-    // is stated whenever it is not the ordinary one, next to the toggle that
-    // caused it.
+    // "why will it not engage": a boat that is inexplicably slow. It is almost
+    // always a speed somebody set two minutes ago and forgot, and without this
+    // line the only symptom is a boat that crawls. So the figure the vessel says
+    // is in force is stated here, always — and it is stated loudly when it is
+    // slower than the tuned default, which is the case worth noticing.
+    //
+    // **There is no toggle here any more.** Careful mode and the three run
+    // profiles are gone: there is one speed, it is set with the Speed field in
+    // the command panel below (`set_speed_limit`), and it covers the hand-flown
+    // go-to, an AUTO mission and every autonomous behaviour including a berth
+    // approach. Two of the old chips never worked at all — `run_profile` was not
+    // in the vessel's forwarding list, so every press came back "not
+    // implemented" — which is its own argument for one control that does.
     this._speed = el('div', 'ap-speed');
     this._speedText = el('span', 'ap-speed-text');
-    this._careful = el('button', 'chip chip--toggle', 'Careful mode (1 kn)');
-    this._careful.type = 'button';
-    this._careful.disabled = !this.canSend;
-    this._careful.title =
-      'Hold the boat to 1 knot so a first pass down an unfamiliar course can be ' +
-      'walked alongside. Takes effect on the next tick and does not interrupt the ' +
-      'run; releasing it does not either.';
-    this._careful.addEventListener('click', () => {
-      // Driven off what the boat reports, not off a local flag: after a dropped
-      // command the two disagree, and that is exactly when this gets pressed.
-      const on = Boolean(this.block?.commander?.careful);
-      this.send(on ? 'careful_off' : 'careful_on');
-    });
-    this._speed.append(this._speedText, this._careful);
+    this._speed.append(this._speedText);
     root.append(this._speed);
-
-    // -- the run profile ---------------------------------------------------
-    //
-    // NJORD gives two attempts at each subtask and the marks do not move between
-    // them, so the attempts are different problems: the first is slow and its
-    // product is the surveyed map, the second is driven off that map at up to the
-    // 5 kn limit. Selecting which one this is has to be one press on a phone on a
-    // pontoon, so it is three chips showing the boat's own answer rather than a
-    // dropdown showing what was last sent.
-    //
-    // `survey` and the Careful mode toggle above are the same state; the toggle
-    // stays because it is what everyone's thumb already knows, and both are
-    // rendered from `commander.profile` so they can never disagree.
-    this._profiles = el('div', 'ap-speed');
-    this._profileChips = new Map();
-    for (const [name, label, hint] of [
-      [
-        'survey',
-        'Survey (1 kn)',
-        'Attempt one. 1 knot, slow enough that every mark gets the dozen sweeps ' +
-          'it needs to be established and the camera gets its four agreeing ' +
-          'frames on each cardinal. The map this run builds is what attempt two ' +
-          'is driven off.',
-      ],
-      [
-        'normal',
-        'Normal',
-        'The tuned defaults, 3.1 kn. What the boat runs when nobody has said ' +
-          'otherwise, and what it comes back up in after a reboot.',
-      ],
-      [
-        'fast',
-        'Fast (up to 5 kn)',
-        'Attempt two, off the surveyed map. Up to the 5 knot vessel limit where ' +
-          'the course allows it, paced down for corners, and giving every mark a ' +
-          'wider berth because clearance is a time budget and speed spends it. ' +
-          'Only sensible once a survey exists.',
-      ],
-    ]) {
-      const chip = el('button', 'chip chip--toggle', label);
-      chip.type = 'button';
-      chip.title = hint;
-      chip.disabled = !this.canSend;
-      chip.addEventListener('click', () => this.send('run_profile', { profile: name }));
-      this._profileChips.set(name, chip);
-      this._profiles.append(chip);
-    }
 
     // The cardinal alternation prior. Off by default, and the label says which
     // way round it is rather than only lighting up, because a switched-on
     // inference the operator has forgotten about is the one thing here that could
     // put the boat on the wrong side of a mark.
+    this._switches = el('div', 'ap-speed');
     this._alternation = el('button', 'chip chip--toggle', 'Alternation prior: off');
     this._alternation.type = 'button';
     this._alternation.disabled = !this.canSend;
@@ -247,8 +196,8 @@ export class AutopilotPanel {
       const on = Boolean(this.block?.commander?.alternation);
       this.send('alternation', { on: !on });
     });
-    this._profiles.append(this._alternation);
-    root.append(this._profiles);
+    this._switches.append(this._alternation);
+    root.append(this._switches);
 
     // -- progress ---------------------------------------------------------
     this._progress = el('div', 'ap-progress');
@@ -383,47 +332,33 @@ export class AutopilotPanel {
   }
 
   /**
-   * The ceiling in force, and the toggle that sets it.
+   * The speed in force, as the vessel reports it.
    *
-   * `speed_ceiling_kn` is what is actually being enforced; `speed_limit_kn` is
-   * the 5 kn vessel limit that no mode can raise. Both are worth showing, but
-   * only the first is worth shouting about, and only when it is not the usual
-   * one — a permanent "3.1 kn ceiling" banner would be noise that hides the
-   * 1 kn one on the day it matters.
+   * `speed_ms`/`speed_kn` is the operator's one setting — what a leg runs at and
+   * the ceiling every behaviour plans under, docking included. `speed_limit_kn`
+   * is NJORD's 5 knots, which nothing can raise. Both are worth showing; only the
+   * first is worth shouting about, and only when it is slower than the boat's
+   * tuned default, because that is the state that reads as a broken boat.
    */
   _updateSpeed(block) {
     const commander = block.commander ?? {};
-    const careful = Boolean(commander.careful);
-    const ceiling = commander.speed_ceiling_kn;
+    const speed = commander.speed_kn ?? commander.speed_ceiling_kn;
     const limit = commander.speed_limit_kn;
+    // Roughly the 1.2 m/s default in knots. Below this the boat is deliberately
+    // being crept along and the panel should say so in the loud colour.
+    const slow = Number.isFinite(speed) && speed < 2.2;
 
-    this._careful.classList.toggle('is-on', careful);
-    this._careful.setAttribute('aria-pressed', String(careful));
-    this._careful.textContent = careful ? 'Careful mode ON — 1 kn' : 'Careful mode (1 kn)';
-
-    this._speed.dataset.careful = String(careful);
-    if (careful) {
-      this._speedText.textContent = Number.isFinite(ceiling)
-        ? `Held to ${ceiling.toFixed(1)} kn`
-        : 'Held to 1 kn';
-    } else if (Number.isFinite(ceiling) && Number.isFinite(limit) && ceiling >= limit) {
-      // The fast profile spends the boat's whole margin, so the ceiling and the
-      // vessel limit are the same number. Saying "Limit 5.0 kn" there would read
-      // as the ordinary state; it is not, and it should look like it is not.
-      this._speedText.textContent = `Running to the ${limit.toFixed(1)} kn limit`;
-    } else if (Number.isFinite(limit)) {
-      this._speedText.textContent = `Limit ${limit.toFixed(1)} kn`;
+    this._speed.dataset.careful = String(slow);
+    if (Number.isFinite(speed) && Number.isFinite(limit)) {
+      this._speedText.textContent = slow
+        ? `Held to ${speed.toFixed(2)} kn — everything, docking included`
+        : `Speed ${speed.toFixed(2)} kn of the ${limit.toFixed(1)} kn limit`;
+    } else if (Number.isFinite(speed)) {
+      this._speedText.textContent = `Speed ${speed.toFixed(2)} kn`;
     } else {
       this._speedText.textContent = '';
     }
 
-    // The profile chips and the prior, both from what the boat reports.
-    const profile = typeof commander.profile === 'string' ? commander.profile : null;
-    for (const [name, chip] of this._profileChips) {
-      const on = profile === name;
-      chip.classList.toggle('is-on', on);
-      chip.setAttribute('aria-pressed', String(on));
-    }
     const alternation = Boolean(commander.alternation);
     this._alternation.classList.toggle('is-on', alternation);
     this._alternation.setAttribute('aria-pressed', String(alternation));
