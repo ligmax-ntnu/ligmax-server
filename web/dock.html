@@ -220,12 +220,19 @@
     <div class="row" style="margin-top: 8px">
       <label class="muted" for="speed-input">Speed limit</label>
       <input type="number" id="speed-input" class="admin-only" min="0.1" max="2.5722"
-             step="0.05" value="0.5" style="width: 90px">
-      <span class="muted">m/s — a ceiling on everything, docking creeps included</span>
+             step="0.05" value="0.3" style="width: 90px">
+      <span class="muted">m/s — the ceiling on everything. The berth itself is
+        <b>0.1 m/s</b> whatever this says</span>
       <button class="small admin-only" id="btn-speed">Set</button>
     </div>
     <p class="note" id="plan-note">Send the plan, then <b>Arm</b>, then
       <b>Engage autonomy</b>. Sending a plan does not start the boat.</p>
+    <p class="note">Speeds inside the berth are fixed low in the vessel's own
+      config and this box cannot raise them: <b>0.1 m/s</b> going in, holding and
+      reversing out, and 0.3 m/s for the run to waypoint 2 and squaring up outside
+      it. Setting this box <i>lower</i> still wins — it is a ceiling on everything.
+      0.1 m/s is 10 cm a second, so crossing a 2 m berth takes 20 s; that is
+      deliberate, because a contact costs a deduction and the completion points.</p>
   </section>
 
   <!-- ============================ chart ================================== -->
