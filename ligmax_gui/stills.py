@@ -184,6 +184,7 @@ class StillStore:
         quality: Any = None,
         note: str = "",
         by: str = "operator",
+        poll_count: int = 0,
     ) -> dict[str, Any]:
         """Ask the vessel for one full-resolution frame per camera.
 
@@ -206,6 +207,11 @@ class StillStore:
                 # rather than the instant each upload happened to land.
                 "group": self._group_name(),
                 "received": [],
+                # The vessel's poll count when this was asked for. What makes a
+                # capture that never arrives diagnosable: if the count has moved
+                # on and no frame came, the vessel is talking to us and declining
+                # (or cannot), which is a different problem from silence.
+                "polls_at": int(poll_count),
             }
             return self._describe_request(self._request)
 
@@ -266,6 +272,7 @@ class StillStore:
             "note": request["note"],
             "requested_at": request["requested_at"],
             "requested_by": request["requested_by"],
+            "polls_at": request["polls_at"],
             "age": round(time.time() - request["requested_at"], 1),
         }
 
@@ -314,6 +321,7 @@ class StillStore:
                     f"limit; delete some first"
                 )
 
+            now = time.time()
             name = f"{group}-cam{camera}.jpg"
             image = self.root / name
             record: dict[str, Any] = {
@@ -323,8 +331,19 @@ class StillStore:
                 "request_id": wanted_id,
                 "note": note,
                 "requested_by": by,
-                "stored_at": time.time(),
+                "stored_at": now,
                 "bytes": len(data),
+                # Button-press to on-disk, measured entirely on THIS machine's
+                # clock. The one honest answer to "how long did that take": every
+                # other interval available here spans two machines, and one of
+                # them is a Jetson with no RTC whose epoch can be minutes out
+                # (`ligmax-edge/estimate.py CaptureClock`). Expect a poll period
+                # plus the upload - roughly 5-20 s on 4G. A figure much larger
+                # than that is a slow link; a `vessel_age_s` much larger than
+                # THIS is a clock offset and not a slow anything.
+                "latency_s": (
+                    round(now - request["requested_at"], 2) if matched else None
+                ),
                 # Whatever the Jetson said about the frame. Passed through
                 # rather than filtered: this is the record of how the picture
                 # was made, and the next person to fit a marker pose to it

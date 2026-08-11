@@ -134,6 +134,15 @@ class CameraRelay:
         self._bytes_received = 0
         self._rejected = 0
         self._last_poll_at: float | None = None
+        # How many times the vessel has asked us anything, and what its build says
+        # it can do. Both exist for one diagnosis that was otherwise impossible:
+        # a Jetson running code from before a feature existed polls perfectly,
+        # ignores the new field, and is indistinguishable from a Jetson that is
+        # not running at all. `caps` is what it volunteers on the poll; anything
+        # missing from it is a build that predates that capability.
+        self._polls = 0
+        self._caps: tuple[str, ...] = ()
+        self._caps_at: float | None = None
         # A poll that arrived and was turned away. Kept apart from
         # `_last_poll_at` because the two produce the same empty panel and have
         # opposite causes: nothing asking (the Jetson is down) versus something
@@ -238,6 +247,14 @@ class CameraRelay:
                     if self._last_poll_at is not None
                     else None
                 ),
+                "polls": self._polls,
+                "caps": list(self._caps),
+                # `None` until something has polled at all: "we do not know" and
+                # "we know it cannot" are different answers and the panel says
+                # different things about them.
+                "supports_capture": (
+                    None if self._last_poll_at is None else "still" in self._caps
+                ),
                 "refused": self._refused,
                 "last_refusal": self._last_refusal,
                 "last_refusal_age": (
@@ -251,16 +268,40 @@ class CameraRelay:
 
     # -- the config the Jetson polls ---------------------------------------
 
-    def poll(self) -> dict[str, Any]:
+    def poll(self, caps: str = "") -> dict[str, Any]:
         """What the Jetson should be doing. Records that it asked.
 
         `last_poll_age` in `state()` is how the panel distinguishes "the operator
         has not switched video on" from "the Jetson is not listening" - two things
         that look identical from a black tile.
+
+        `caps` is a comma-separated list the vessel volunteers about its own build
+        - currently just `still`. It is only ever *added* to by a poll that carries
+        one, never cleared by a poll that does not, because the frame POST comes
+        through here too and does not bother repeating it.
+
+        An empty `caps` from a board that is otherwise talking normally is
+        therefore a real answer and not a missing one: it means a build that
+        predates the capability. That distinction is the whole point - see
+        `stills.py`, where "the vessel has polled four times since you pressed the
+        button and its build cannot take a picture" is the only useful thing to
+        say about a capture that will never arrive.
         """
         with self._lock:
             self._last_poll_at = time.time()
+            self._polls += 1
+            if caps:
+                self._caps = tuple(
+                    sorted({c.strip()[:24] for c in caps.split(",") if c.strip()})
+                )[:8]
+                self._caps_at = self._last_poll_at
             return {**self._stream, "config_version": self._config_version}
+
+    @property
+    def polls(self) -> int:
+        """Times the vessel has asked us anything. Monotonic for this process."""
+        with self._lock:
+            return self._polls
 
     def note_refused(self, what: str) -> None:
         """Something claiming to be the boat was turned away at the door.

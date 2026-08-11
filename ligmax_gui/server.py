@@ -693,6 +693,32 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 out["vessel_age_s"] = round(float(last_frame) - float(captured_at), 2)
         except (TypeError, ValueError):
             pass
+        # Two independent skews, named so they cannot be confused with each other
+        # or with an elapsed time. `boat_clock_offset` is the Pi's epoch minus
+        # ours, measured on every telemetry frame; `vessel_age_s` also contains
+        # the *Jetson's* offset, because it compares a Pi-stamped arrival against
+        # a Jetson-stamped shutter. So if the Pi's offset is near zero and
+        # `vessel_age_s` is tens of seconds, the difference is the Jetson's clock
+        # and nothing at all was slow - which is a conclusion worth stating here
+        # rather than leaving to be re-derived from two numbers on a page.
+        pi_offset = stats.get("boat_clock_offset")
+        try:
+            if out.get("vessel_age_s") is not None and abs(
+                float(out["vessel_age_s"]) - float(pi_offset or 0.0)
+            ) > 20.0:
+                out["clock_skew_s"] = round(
+                    float(out["vessel_age_s"]) - float(pi_offset or 0.0), 2
+                )
+                out["clock_note"] = (
+                    "the Jetson's clock is offset from this server by about this "
+                    "much - it has no RTC and NTP's first correction is a step, "
+                    "not a slew (ligmax-edge/estimate.py CaptureClock, "
+                    "docs/findings.md item 23). Read `latency_s` for how long the "
+                    "capture actually took."
+                )
+        except (TypeError, ValueError):
+            pass
+
         if not telemetry.get("attitude"):
             # Said in the record rather than left as a missing key, because the
             # absence is a fact about the vessel's software and not about this
@@ -714,7 +740,13 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         completed one, so calling it on every poll is the point rather than a
         side effect to be avoided.
         """
-        return {**cameras.poll(), "capture": captures.pending()}
+        # `caps` is what the vessel volunteers about its own build - see
+        # `CameraRelay.poll`. Read from the query string on both the config poll
+        # and the frame POST, so either kind of contact updates it.
+        return {
+            **cameras.poll(request.args.get("caps", "")),
+            "capture": captures.pending(),
+        }
 
     @app.post("/api/camera")
     def camera_ingest() -> Response:
@@ -831,6 +863,7 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             quality=payload.get("quality"),
             note=payload.get("note") or "",
             by=_client_ip(),
+            poll_count=cameras.polls,
         )
         store.add_log(
             "INFO",
@@ -840,14 +873,20 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
             + f" [{_client_ip()}]",
             "gui.camera",
         )
-        return jsonify({"ok": True, **captures.state()})
+        state = captures.state()
+        return jsonify(
+            {"ok": True, **state, "link": _capture_diagnosis(state.get("pending"))}
+        )
 
     @app.delete("/api/camera/capture")
     def camera_capture_cancel() -> Response:
         if not is_admin():
             return jsonify({"error": "admin session required"}), 403  # type: ignore[return-value]
         captures.cancel()
-        return jsonify({"ok": True, **captures.state()})
+        state = captures.state()
+        return jsonify(
+            {"ok": True, **state, "link": _capture_diagnosis(state.get("pending"))}
+        )
 
     @app.post("/api/camera/capture/upload")
     def camera_capture_upload() -> Response:
@@ -931,11 +970,103 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         # camera's upload learns the request is now complete.
         return jsonify({"ok": True, "still": info, "capture": captures.pending()})
 
+    def _capture_diagnosis(pending: dict[str, Any] | None) -> dict[str, Any]:
+        """Why a capture has not arrived, in the words that fix it.
+
+        A capture is collected on a poll, so "nothing has happened" has four
+        causes that look identical from a spinning button, and the operator's next
+        action is different for each. Guessing wrong costs a trip to the boat:
+
+          nothing has ever polled        the Jetson is not running, or cannot
+                                        reach us at all
+          polls are being REFUSED       it is running and its key is wrong
+                                        (LIGMAX_BOAT_KEY on ligmax-json.local)
+          polling, `still` not offered   it is running code from before captures
+                                        existed - git pull and restart sender.py
+          polling, `still` offered       it heard us and the frame is in flight or
+                                        the encode failed; the Jetson's own log
+                                        is where that shows
+
+        The third is the one worth the machinery: a build that predates a feature
+        polls perfectly and ignores the new field, which without `caps` is
+        indistinguishable from a board that is switched off.
+        """
+        state = cameras.state()
+        polls = state.get("polls") or 0
+        age = state.get("last_poll_age")
+        supports = state.get("supports_capture")
+        since = polls - int((pending or {}).get("polls_at") or 0) if pending else None
+
+        out: dict[str, Any] = {
+            "polls": polls,
+            "last_poll_age": age,
+            "caps": state.get("caps") or [],
+            "supports_capture": supports,
+            "polls_since_request": since,
+            "refused": state.get("refused") or 0,
+            "last_refusal": state.get("last_refusal"),
+            "last_refusal_age": state.get("last_refusal_age"),
+        }
+
+        if state.get("refused") and (state.get("last_refusal_age") or 1e9) < 120:
+            out["verdict"] = "refused"
+            out["why"] = (
+                f"The vessel is reaching this server and being turned away: "
+                f"{state.get('last_refusal')}. Check LIGMAX_BOAT_KEY in "
+                f"/etc/ligmax/node.env on ligmax-json.local."
+            )
+        elif age is None:
+            out["verdict"] = "silent"
+            out["why"] = (
+                "Nothing on the vessel has ever asked this server for the camera "
+                "config, so nothing can collect a capture. Start the Jetson's "
+                "sender (./run.sh on ligmax-json.local)."
+            )
+        elif age > 30:
+            out["verdict"] = "stale"
+            out["why"] = (
+                f"The Jetson last checked in {age:.0f} s ago and polls every 5 s, "
+                f"so it is not currently listening."
+            )
+        elif supports is False:
+            out["verdict"] = "unsupported"
+            out["why"] = (
+                "The Jetson is polling normally but its build does not offer "
+                "full-resolution captures - it is running sender.py from before "
+                "that existed. On ligmax-json.local: git pull, then restart "
+                "sender.py (./run.sh). Nothing else needs to change."
+            )
+        elif pending and (since or 0) >= 2:
+            out["verdict"] = "declining"
+            out["why"] = (
+                f"The Jetson has polled {since} times since you asked and has "
+                f"sent nothing. It understands the request, so the failure is on "
+                f"that board - check its log for 'still not sent' (a missing "
+                f"Pillow is the usual cause) or 'still upload failed'."
+            )
+        elif pending:
+            out["verdict"] = "waiting"
+            out["why"] = (
+                "Asked. The Jetson collects it on its next poll, then each frame "
+                "is a couple of megabytes up the 4G link."
+            )
+        else:
+            out["verdict"] = "ready"
+            out["why"] = "The Jetson is polling and offers full-resolution capture."
+        return out
+
     @app.get("/api/camera/captures")
     def camera_captures() -> Response:
         if not may_read():
             return jsonify({"error": "unauthorised"}), 401  # type: ignore[return-value]
-        response = jsonify({**captures.state(), "admin": is_admin()})
+        state = captures.state()
+        response = jsonify(
+            {
+                **state,
+                "admin": is_admin(),
+                "link": _capture_diagnosis(state.get("pending")),
+            }
+        )
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -971,7 +1102,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         if not ok:
             return jsonify({"error": why}), 404  # type: ignore[return-value]
         store.add_log("WARN", f"still {name} deleted [{_client_ip()}]", "gui.camera")
-        return jsonify({"ok": True, **captures.state()})
+        state = captures.state()
+        return jsonify(
+            {"ok": True, **state, "link": _capture_diagnosis(state.get("pending"))}
+        )
 
     @app.get("/captures")
     def captures_page() -> Response:

@@ -182,6 +182,7 @@
     <span id="role-pill" class="pill">read-only</span>
   </div>
   <div class="right">
+    <span id="link-pill" class="pill">&mdash;</span>
     <span id="held-pill" class="pill">&mdash;</span>
     <button id="refresh-btn">Refresh</button>
   </div>
@@ -281,8 +282,20 @@
     if (Array.isArray(v.position)) {
       rows.push(['grid', `${v.position[0]?.toFixed?.(1) ?? '?'}, ${v.position[1]?.toFixed?.(1) ?? '?'} m`]);
     }
-    if (shot.vessel_age_s !== undefined && shot.vessel_age_s !== null) {
-      rows.push(['telemetry age', `${shot.vessel_age_s} s from the shutter`]);
+    // "How long did it take" and "how far apart are the clocks" are two
+    // questions, and one number cannot answer both. `latency_s` is button-press
+    // to on-disk on this machine's clock alone - the only one of these that is an
+    // elapsed time. `vessel_age_s` spans the Jetson's clock, which has no RTC and
+    // can sit minutes out, so a large value there next to a small latency means
+    // the clocks disagree and nothing was slow.
+    if (Number.isFinite(shot.latency_s)) {
+      rows.push(['capture took', `${shot.latency_s} s (press → saved)`]);
+    }
+    if (Number.isFinite(shot.clock_skew_s)) {
+      rows.push(['jetson clock', `${shot.clock_skew_s > 0 ? 'behind' : 'ahead'} by `
+        + `${Math.abs(shot.clock_skew_s)} s — not a delay`]);
+    } else if (Number.isFinite(shot.vessel_age_s)) {
+      rows.push(['telemetry vs shutter', `${shot.vessel_age_s} s (two clocks)`]);
     }
     if (shot.vessel_why) rows.push(['no pose', shot.vessel_why]);
     return rows;
@@ -376,7 +389,30 @@
       : 'Capture full-res ×2';
     $('cancel-btn').classList.toggle('hidden', !(admin && pending));
 
-    if (pending) {
+    // The link verdict comes first and outranks everything: a capture that will
+    // never arrive has four causes with four different fixes, and "waiting…"
+    // is the wrong thing to say about any of them. See server._capture_diagnosis.
+    const link = state.link || {};
+    const linkPill = $('link-pill');
+    linkPill.textContent = {
+      refused: 'vessel refused',
+      silent: 'jetson silent',
+      stale: 'jetson stale',
+      unsupported: 'jetson: old build',
+      declining: 'jetson not answering',
+      waiting: 'waiting',
+      ready: 'jetson ready',
+    }[link.verdict] || '—';
+    linkPill.className = 'pill ' + ({
+      refused: 'bad', silent: 'bad', stale: 'warn',
+      unsupported: 'bad', declining: 'bad', waiting: 'warn', ready: 'ok',
+    }[link.verdict] || '');
+
+    const broken = ['refused', 'silent', 'stale', 'unsupported', 'declining']
+      .includes(link.verdict);
+    if (broken) {
+      setNote(link.why, 'bad');
+    } else if (pending) {
       const waiting = pending.cameras.filter((id) => !pending.received.includes(id));
       setNote(
         `Waiting for cam${waiting.join(', cam')} — asked ${Math.round(pending.age)} s ago`
@@ -388,6 +424,8 @@
       setNote(`Last error: ${state.last_error}`, 'bad');
     } else if (lastPending && !pending) {
       setNote('Captured. The newest pair is at the top.', 'ok');
+    } else {
+      setNote(link.why || 'Ready.', 'ok');
     }
     lastPending = pending;
 
