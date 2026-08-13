@@ -449,8 +449,75 @@ def test_content_range_parsing():
             check(True, f"{why} is refused")
 
 
+def test_plan_validation() -> None:
+    """What ``set_plan`` lets through to the vessel, field by field.
+
+    This file had no plan test at all, and that is exactly how ``park_no_exit`` came
+    to be dropped: ``plan._waypoint`` builds its output field by field, the field was
+    never added, and nothing anywhere compared what the page sends against what comes
+    out.  The surprise task's final berth is the one place that flag decides the
+    outcome — the run ends inside the berth, or the boat reverses out of it — and the
+    page has been sending it since 2026-08-12 into a validator that discarded it.
+    """
+    section("plan validation — what actually reaches the boat")
+
+    from ligmax_gui import plan as planning
+
+    base = {
+        "name": "surprise-task",
+        "buoyage": "route",
+        "cardinal_rule": "inside",
+        "waypoints": [
+            {"name": "13", "lat": 63.441135, "lon": 10.424155, "role": "transit"},
+            {"name": "14", "lat": 63.441063, "lon": 10.424141,
+             "role": "park_tag_parallel", "hold_s": 10, "park_probe_deg": 148},
+            {"name": "15", "lat": 63.441155, "lon": 10.423620, "role": "buoys"},
+            {"name": "16", "lat": 63.440880, "lon": 10.423413, "role": "buoys"},
+            {"name": "17", "lat": 63.440810, "lon": 10.423840, "role": "buoys"},
+            {"name": "18", "lat": 63.440950, "lon": 10.423950, "role": "park_tag",
+             "hold_s": 10, "park_probe_deg": 86, "park_no_exit": True},
+        ],
+    }
+
+    cleaned, why = planning.validate(base)
+    check(why is None, f"the surprise-task course validates ({why})")
+    assert cleaned is not None
+    check(cleaned["waypoints"][5].get("park_no_exit") is True,
+          "park_no_exit SURVIVES validation and reaches the vessel")
+    check("park_no_exit" not in cleaned["waypoints"][1],
+          "...and is not invented on a waypoint that did not ask for it")
+    check(cleaned.get("buoyage") == "route" and cleaned.get("cardinal_rule") == "inside",
+          "the two course-level ring rules survive too")
+    check("buoyage=route" in planning.summarise(cleaned),
+          "...and the audit line says which rules were sent")
+
+    # Refused, not dropped: a flag on a role with no berth to stay in is a typo the
+    # operator has to see, and the vessel refuses it identically.
+    stray = {"waypoints": [dict(base["waypoints"][2], park_no_exit=True)]}
+    _cleaned, why = planning.validate(stray)
+    check(why is not None and "park_no_exit" in why,
+          f"park_no_exit on 'buoys' is refused: {why}")
+
+    bad = {"waypoints": [dict(base["waypoints"][5], park_no_exit="yes")]}
+    _cleaned, why = planning.validate(bad)
+    check(why is not None and "true or false" in why,
+          f"a non-boolean park_no_exit is refused: {why}")
+
+    for field, value in (("buoyage", "rout"), ("cardinal_rule", "insde")):
+        _cleaned, why = planning.validate({**base, field: value})
+        check(why is not None and field in why, f"{field}={value!r} is refused: {why}")
+
+    # A plan that says nothing about either rule must come out exactly as it did
+    # before they existed, or every other course on the boat has quietly changed.
+    plain, why = planning.validate({"waypoints": [base["waypoints"][0]]})
+    check(why is None and plain is not None
+          and "buoyage" not in plain and "cardinal_rule" not in plain,
+          "a course that sets neither rule carries neither")
+
+
 TESTS = [
     test_command_specs,
+    test_plan_validation,
     test_content_range_parsing,
     test_trip_upload_whole,
     test_trip_upload_resume,

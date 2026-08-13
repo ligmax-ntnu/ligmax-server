@@ -13,7 +13,18 @@
   Standalone like `/debug/lidar_viz` - one file, no shared frontend modules -
   and most of it needed no new backend reads: it polls the existing
   `/api/session` and `/api/snapshot`, and sends through the existing
-  `/api/command` (`set_lights_mode`, `set_lights_pattern`, `set_lights_fps`).
+  `/api/command` (`set_lights_mode`, `set_lights_pattern`, `set_lights_fps`,
+  and since 2026-08-13 `set_lights_servos`).
+
+  The headlight-cover servos are here because they are on the same ESP32 and
+  the same UART, and nowhere else on the dashboard was going to grow a control
+  for two servos. They are otherwise unlike everything above them: they move a
+  mechanism instead of lighting one, they are not behind the standard/custom
+  switch, and KILLED does not touch them - solid red is a promise about the
+  thrusters, not about where a cover is parked. Their travel comes from
+  `/api/session` -> `lights_servos` rather than being written into this file,
+  the same way the course editor stopped keeping its own copy of the speed
+  limit.
   Saving and loading named effects is the one addition that could not ride
   those - `/api/lights/effects` is this page's own, the same way
   `/api/tuning/profiles` is `/control`'s (ligmax_gui/tuning.py): the only
@@ -152,9 +163,21 @@
   .fps-input { width: 70px; font-size: 13px; padding: 5px 6px; }
 
   .send-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  #send-status.ok { color: var(--ok); }
-  #send-status.bad { color: var(--bad); }
-  #send-status.muted { color: var(--dim); }
+  #send-status.ok, #servo-status.ok { color: var(--ok); }
+  #send-status.bad, #servo-status.bad { color: var(--bad); }
+  #send-status.muted, #servo-status.muted { color: var(--dim); }
+
+  /* The two cover servos. One row per side, and the end labels are filled from
+     the server's own bounds - the sides are mirrored, so which end is "open"
+     differs between the two rows and must not be hard-coded here. */
+  .servo { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .servo-name { width: 46px; font-size: 12.5px; color: var(--dim); }
+  .servo-end { font-size: 11px; color: var(--dim); width: 74px; }
+  .servo-end.hi { text-align: left; }
+  .servo-end.lo { text-align: right; }
+  .servo-slider { width: 240px; accent-color: var(--accent); }
+  .servo-slider:disabled { opacity: .4; cursor: not-allowed; }
+  .servo-deg { width: 62px; }
 </style>
 
 <header id="bar">
@@ -256,6 +279,53 @@
   </section>
 
   <section class="card">
+    <h2>Headlight covers</h2>
+    <div class="servo" data-side="left">
+      <span class="servo-name">Left</span>
+      <span class="servo-end lo"></span>
+      <input type="range" class="servo-slider admin-only" step="1">
+      <span class="servo-end hi"></span>
+      <input type="number" class="hold-input servo-deg admin-only" step="1">
+      <span class="ms-label">°</span>
+      <span class="pill servo-shown">boat: —</span>
+    </div>
+    <div class="servo" data-side="right">
+      <span class="servo-name">Right</span>
+      <span class="servo-end lo"></span>
+      <input type="range" class="servo-slider admin-only" step="1">
+      <span class="servo-end hi"></span>
+      <input type="number" class="hold-input servo-deg admin-only" step="1">
+      <span class="ms-label">°</span>
+      <span class="pill servo-shown">boat: —</span>
+    </div>
+    <div class="toolbar">
+      <button id="btn-covers-closed" class="admin-only">Closed</button>
+      <button id="btn-covers-half" class="admin-only">Half</button>
+      <button id="btn-covers-open" class="admin-only">Open</button>
+      <span id="servo-status" class="muted"></span>
+    </div>
+    <p class="hint">
+      The two servos that swing the headlight covers, straight to an angle each
+      — the only control on this page that <b>moves a mechanism</b> rather than
+      lighting one, so it goes nowhere near the pattern above and is not part of
+      the standard/custom switch. Nothing here is gated by KILLED either: a
+      cover is not a signal. Release the slider (or press a preset) to send;
+      dragging alone changes nothing on the boat.
+      <br>
+      The two sides are <b>mirrored</b> — left opens by increasing the angle,
+      right by decreasing it — so the same number is not the same place on the
+      two covers, and each slider is labelled with its own ends. The travel
+      shown is the span between the two hand-calibrated endpoints in
+      <code>lights_esp.ino</code>, and it is the whole of what anyone has
+      measured: past an endpoint the cover drives into its own stop, so an angle
+      outside it is refused here, refused again on the vessel, and clamped by
+      the firmware. <b>Commanded, never measured</b> — these servos have no
+      feedback, so "boat:" is the angle the ESP32 was last told, not one it
+      confirmed.
+    </p>
+  </section>
+
+  <section class="card">
     <h2>Send</h2>
     <div class="send-row">
       <button id="btn-send" class="admin-only primary">Send pattern to boat</button>
@@ -308,7 +378,17 @@
   let modeRequestPending = false;
   let fpsRequestPending = false;
   let pendingCommandId = null;
+  let pendingServoId = null;
   let effects = [];
+
+  // Per-side cover-servo bounds, from /api/session's `lights_servos` (which
+  // mirrors lights.py's SERVO_ENDPOINTS, which mirrors the sketch's). Null until
+  // that arrives, and the sliders stay disabled while it is: a range input with
+  // guessed ends is how a servo gets asked to drive into its stop, and this page
+  // is one of four copies of that number already.
+  let servoLimits = null;
+  let servoRequestPending = false;
+  let servoSeeded = false; // have the two boxes been given a starting angle yet?
 
   let frames = [{ pixels: Array(NUM_LEDS).fill(OFF), holdMs: DEFAULT_HOLD_MS }];
   let activeFrame = 0;
@@ -672,6 +752,138 @@
     }
   });
 
+  /* --- headlight cover servos --------------------------------------------- */
+
+  const SERVO_SIDES = ['left', 'right'];
+  const servoRow = (side) => document.querySelector(`.servo[data-side="${side}"]`);
+  const servoStatus = $('servo-status');
+
+  function servoEl(side, klass) { return servoRow(side).querySelector(klass); }
+
+  // Bounds, and the labels that say which end is which. Both come from the
+  // server because the sides are mirrored: hard-coding "closed" on the left of
+  // both rows would be wrong for one of them, and wrong in the direction that
+  // has somebody dragging a cover into its stop while reading the label.
+  function applyServoLimits(limits) {
+    servoLimits = limits || null;
+    for (const side of SERVO_SIDES) {
+      const bounds = servoLimits && servoLimits[side];
+      const slider = servoEl(side, '.servo-slider');
+      const deg = servoEl(side, '.servo-deg');
+      if (!bounds) {
+        slider.disabled = true;
+        deg.disabled = true;
+        servoEl(side, '.servo-end.lo').textContent = '';
+        servoEl(side, '.servo-end.hi').textContent = '';
+        continue;
+      }
+      for (const input of [slider, deg]) {
+        input.min = String(bounds.min);
+        input.max = String(bounds.max);
+      }
+      // A range input with no value of its own reports the midpoint of its range,
+      // not an empty string, so "leave it alone if it is unset" cannot be
+      // expressed that way - it would show half-open on a page nobody had
+      // touched. Seed both boxes once, closed, and let the next snapshot move
+      // them to wherever the vessel says the covers actually are.
+      if (!servoSeeded) showServoAngle(side, bounds.closed);
+      const nameOf = (value) => (value === bounds.closed ? 'closed' : value === bounds.open ? 'open' : '');
+      servoEl(side, '.servo-end.lo').textContent = `${bounds.min}° ${nameOf(bounds.min)}`;
+      servoEl(side, '.servo-end.hi').textContent = `${bounds.max}° ${nameOf(bounds.max)}`;
+    }
+    if (servoLimits) servoSeeded = true;
+    syncServoControls();
+  }
+
+  function syncServoControls() {
+    const usable = admin && !!servoLimits;
+    for (const side of SERVO_SIDES) {
+      servoEl(side, '.servo-slider').disabled = !usable;
+      servoEl(side, '.servo-deg').disabled = !usable;
+    }
+    for (const id of ['btn-covers-closed', 'btn-covers-half', 'btn-covers-open']) {
+      $(id).disabled = !usable;
+    }
+    if (!servoLimits && admin) {
+      servoStatus.textContent = 'this server build does not publish the cover travel — controls disabled';
+      servoStatus.className = 'bad';
+    }
+  }
+
+  function clampServo(side, value) {
+    const bounds = servoLimits && servoLimits[side];
+    const number = Math.round(Number(value));
+    if (!bounds || !Number.isFinite(number)) return null;
+    return Math.min(bounds.max, Math.max(bounds.min, number));
+  }
+
+  function showServoAngle(side, deg) {
+    servoEl(side, '.servo-slider').value = String(deg);
+    servoEl(side, '.servo-deg').value = String(deg);
+  }
+
+  // Both angles every time - `set_lights_servos` requires both args, and the
+  // covers are a pair on the boat, so moving one while asserting the other's
+  // current value is the honest wire form rather than a compromise.
+  async function sendServos() {
+    if (!admin || !servoLimits) return;
+    const args = {};
+    for (const side of SERVO_SIDES) {
+      const deg = clampServo(side, servoEl(side, '.servo-slider').value);
+      if (deg === null) return;
+      args[side] = deg;
+      showServoAngle(side, deg);
+    }
+    servoRequestPending = true;
+    servoStatus.textContent = 'moving…';
+    servoStatus.className = 'muted';
+    try {
+      const body = await postCommand('set_lights_servos', args);
+      pendingServoId = body.command.id;
+      servoStatus.textContent = `sent ${args.left}° / ${args.right}° — command #${body.command.id}`;
+      servoStatus.className = 'muted';
+    } catch (err) {
+      servoStatus.textContent = 'failed: ' + (err.message || err);
+      servoStatus.className = 'bad';
+    } finally {
+      servoRequestPending = false;
+    }
+  }
+
+  for (const side of SERVO_SIDES) {
+    const slider = servoEl(side, '.servo-slider');
+    const deg = servoEl(side, '.servo-deg');
+    // `input` while dragging only moves the number beside it; `change` fires on
+    // release, and that is what reaches the boat. A command per pixel of drag
+    // would be a hundred audit entries and a servo chasing its own queue.
+    slider.addEventListener('input', () => { deg.value = slider.value; });
+    slider.addEventListener('change', sendServos);
+    deg.addEventListener('change', () => {
+      const value = clampServo(side, deg.value);
+      if (value === null) return;
+      showServoAngle(side, value);
+      sendServos();
+    });
+  }
+
+  // The presets are the named positions, per side, out of the same bounds - so
+  // "Open" is 110° on the left and 70° on the right without this page knowing
+  // which of those is the bigger number.
+  function presetCovers(pick) {
+    if (!admin || !servoLimits) return;
+    for (const side of SERVO_SIDES) {
+      const bounds = servoLimits[side];
+      const deg = pick === 'half'
+        ? Math.round((bounds.closed + bounds.open) / 2)
+        : bounds[pick];
+      showServoAngle(side, clampServo(side, deg));
+    }
+    sendServos();
+  }
+  $('btn-covers-closed').addEventListener('click', () => presetCovers('closed'));
+  $('btn-covers-half').addEventListener('click', () => presetCovers('half'));
+  $('btn-covers-open').addEventListener('click', () => presetCovers('open'));
+
   /* --- saved effects ------------------------------------------------------ */
 
   // Examples and saved effects load identically, so they share one <select> -
@@ -809,6 +1021,7 @@
     modeToggle.disabled = !isAdmin;
     syncEffectButtons(); // ...except Delete, which the blanket line above just
                          // re-enabled even for an example
+    syncServoControls(); // ...and the cover sliders, which also need the bounds
     rolePill.textContent = isAdmin ? 'admin' : 'read-only';
     rolePill.className = 'pill ' + (isAdmin ? 'ok' : 'warn');
     readonlyBanner.classList.toggle('hidden', isAdmin);
@@ -825,6 +1038,10 @@
     try {
       const res = await fetch('/api/session', { credentials: 'same-origin' });
       const body = await res.json();
+      // Bounds before the role: `applyAdmin` re-enables everything with an
+      // `admin-only` class, and the cover sliders need both facts before they
+      // can be enabled - so the one that arrives here goes in first.
+      applyServoLimits(body.lights_servos);
       applyAdmin(!!body.admin);
     } catch (err) { /* leave the last known role in place */ }
   }
@@ -860,12 +1077,44 @@
       fpsCurrent.textContent = 'current: unknown';
     }
 
+    // The cover angles the vessel says it last sent the ESP32 - commanded, not
+    // measured, since these servos report nothing back. Absent until somebody
+    // has moved them, in which case the covers are wherever the ESP32 booted
+    // them (closed) and saying so beats printing a number nobody commanded.
+    for (const side of SERVO_SIDES) {
+      const deg = lights[`servo_${side}_deg`];
+      const pill = servoRow(side).querySelector('.servo-shown');
+      if (typeof deg !== 'number') {
+        pill.textContent = 'boat: not set';
+        pill.className = 'pill servo-shown';
+        continue;
+      }
+      pill.textContent = `boat: ${Math.round(deg)}°`;
+      pill.className = 'pill servo-shown accent';
+      // Follow the vessel while nobody is mid-edit, so a reload shows where the
+      // covers actually are rather than this page's own default.
+      const slider = servoEl(side, '.servo-slider');
+      const input = servoEl(side, '.servo-deg');
+      const busy = servoRequestPending || pendingServoId
+        || document.activeElement === slider || document.activeElement === input;
+      if (!busy && servoLimits) showServoAngle(side, clampServo(side, deg));
+    }
+
     if (pendingCommandId) {
       const cmd = (snapshot.commands || []).find((c) => c.id === pendingCommandId);
       if (cmd && cmd.status !== 'queued' && cmd.status !== 'delivered') {
         sendStatus.textContent = cmd.status + (cmd.result ? ': ' + cmd.result : '');
         sendStatus.className = cmd.status === 'acked' ? 'ok' : 'bad';
         pendingCommandId = null;
+      }
+    }
+
+    if (pendingServoId) {
+      const cmd = (snapshot.commands || []).find((c) => c.id === pendingServoId);
+      if (cmd && cmd.status !== 'queued' && cmd.status !== 'delivered') {
+        servoStatus.textContent = cmd.status + (cmd.result ? ': ' + cmd.result : '');
+        servoStatus.className = cmd.status === 'acked' ? 'ok' : 'bad';
+        pendingServoId = null;
       }
     }
   }

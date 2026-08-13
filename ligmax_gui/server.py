@@ -85,6 +85,38 @@ MAX_MISSION_WAYPOINTS = 100
 MIN_LIGHTS_FPS = 1.0
 MAX_LIGHTS_FPS = 60.0
 
+# The headlight covers' travel, mirroring lights.py's SERVO_ENDPOINTS, which in
+# turn mirrors lights_esp.ino's SERVO_L_/SERVO_R_ CLOSED and OPEN. Three copies
+# of one hand-calibrated fact, in three repos; the firmware's is the one that
+# clamps, the vessel's is the one that refuses, and this one exists so a slider
+# knows where its ends are and a bad angle is a 400 the operator reads.
+#
+# The sides are MIRRORED - left opens by increasing the angle, right by
+# decreasing it - so nothing here may reduce the pair to one range.
+LIGHTS_SERVO_ENDPOINTS = {
+    "left": {"closed": 20, "open": 110},
+    "right": {"closed": 160, "open": 70},
+}
+
+
+def _lights_servo_limits() -> dict[str, dict[str, float]]:
+    """The per-side bounds `/led_control` builds its two sliders from.
+
+    Sent on `/api/session` rather than written into the page, for the reason
+    `waypoint_limits` is: an `<input min>` that is a fourth copy of a hardware
+    number is the copy that drifts, and the drift is silent until something is
+    already at the wrong angle.
+    """
+    return {
+        side: {
+            "closed": ends["closed"],
+            "open": ends["open"],
+            "min": min(ends["closed"], ends["open"]),
+            "max": max(ends["closed"], ends["open"]),
+        }
+        for side, ends in LIGHTS_SERVO_ENDPOINTS.items()
+    }
+
 # `set_speed_limit`'s bounds, mirroring ligmax-pi/nodes/io_manager/guided.py's
 # MIN_LIMIT_MS/MAX_LIMIT_MS - which are in turn NJORD's 5 knots out of that
 # repo's config.py, the number the vessel enforces and no dashboard can raise.
@@ -274,6 +306,21 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "args": {"fps": "float"},
         "log_level": "WARN",
     },
+    # The two headlight-cover servos on the lights ESP32, to an angle each, from
+    # /led_control's sliders. Both angles every time: every arg declared here is
+    # required (see the validator), and two sliders that are always sent together
+    # is also the honest shape - the covers are a pair on the boat.
+    #
+    # The only lights command that moves a mechanism rather than lighting one,
+    # which is why it is bounded per side below rather than clamped, and why it
+    # is logged at WARN: a cover found somewhere nobody left it is a thing to be
+    # able to look up afterwards. Not `confirm`, though - it is small, reversible
+    # by moving the slider back, and meant to be dragged while watching the bow.
+    "set_lights_servos": {
+        "label": "Headlight cover angles",
+        "args": {"left": "float", "right": "float"},
+        "log_level": "WARN",
+    },
     # --- the autonomy node -------------------------------------------------
     #
     # These are the only commands on this list that io_manager does NOT handle:
@@ -293,6 +340,27 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "log_level": "WARN",
     },
     "clear_plan": {"label": "Forget the course", "args": {}, "confirm": True},
+    # Which camera sources may create red and green marks - the two modes on
+    # /surprise_task. `perception/world.absorb_detections` normally refuses to let
+    # any camera detection create a mark, because the buoy detector is weak and a
+    # phantom buoy is worse than a missing one; with both lidars dead that rule
+    # leaves `behaviours/buoys.py` with an empty world model and a scored buoy leg
+    # degrades to blind GNSS transit. This is the switch that opens the exception,
+    # and the vessel default is OFF.
+    #
+    # Logged at WARN and not confirmed: it changes what the boat believes rather
+    # than what it is doing, it is reversible by pressing another one, and it is
+    # meant to be flipped while watching the mask. What must be findable afterwards
+    # is which source was live on which attempt - hence the log line.
+    #
+    # `sources` is a comma-separated string ("colour", "yolo", "colour,yolo") or
+    # empty for off. Validated on the vessel, which owns the list of sources that
+    # exist, and which answers in the operator's own words.
+    "set_mark_source": {
+        "label": "Mark source (colour / YOLO)",
+        "args": {"sources": "str"},
+        "log_level": "WARN",
+    },
     # The timer in NJORD §8.1 starts when the boat goes autonomous, and this is
     # the moment it does: it requests GUIDED, arms, and opens a trip recording.
     "autopilot_start": {
@@ -620,6 +688,10 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 # limit and it was the one that had drifted.
                 "waypoint_limits": planning.limits_table(),
                 "max_waypoints": planning.MAX_WAYPOINTS,
+                # The headlight covers' travel, for /led_control's two sliders -
+                # same reasoning as `waypoint_limits` right above, and see
+                # `_lights_servo_limits()`.
+                "lights_servos": _lights_servo_limits(),
                 "vessel_status": protocol.VESSEL_STATUS,
                 "server_time": time.time(),
                 "shared_settings": protocol.SHARED_SETTINGS_AVAILABLE,
@@ -1327,6 +1399,32 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/surprise_task")
+    def surprise_task() -> Response:
+        """The surprise task, end to end: two dockings and the buoy legs between.
+
+        A sixth page, same treatment as `/dock` and `/led_control` - read gate like
+        every other page, admin gate per command, self-contained so a change to the
+        main dashboard's frontend cannot break the one page somebody is standing on
+        a pontoon using.
+
+        It is a merge of the overview and `/dock` rather than either, because this
+        task is a bow-in docking, a scored buoy course and an alongside docking in
+        one run with no pause between them - and because with both lidars dead the
+        buoy legs need a decision nothing else on the dashboard offers: which camera
+        source, if any, may create the red and green marks the boat steers by
+        (`set_mark_source`). The colour mask it draws over the camera pair is the
+        vessel's own hue windows, so the thresholds can be checked against the day's
+        light before the boat is asked to act on them.
+        """
+        if (response := consume_key_param(url_for("surprise_task"))) is not None:
+            return response
+        if not may_read():
+            return deny_read()
+        response = make_response(send_from_directory(WEB_ROOT, "surprise_task.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/led_control")
     def led_control() -> Response:
         if (response := consume_key_param(url_for("led_control"))) is not None:
@@ -1481,6 +1579,35 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
         if name == "alternation":
             cleaned["on"] = bool(cleaned.get("on"))
 
+        if name == "set_mark_source":
+            # Mirrored from `self_driving/commander.set_mark_source`, for the same
+            # reason `set_param`'s whitelist is mirrored: a typo comes back
+            # immediately instead of sitting at "sent" until the vessel answers.
+            # The vessel validates it again and the vessel's answer is the real one -
+            # this only catches what can be caught without it.
+            #
+            # An EMPTY string is valid and means off. That is not a slip: the page's
+            # Off button sends it, and rejecting it here would make "no camera marks"
+            # the one setting the dashboard could not express.
+            known = ("colour", "yolo")
+            wanted = [
+                part.strip().lower()
+                for part in str(cleaned.get("sources") or "").split(",")
+                if part.strip()
+            ]
+            unknown = [part for part in wanted if part not in known]
+            if unknown:
+                return jsonify(  # type: ignore[return-value]
+                    {
+                        "error": (
+                            f"unknown mark source{'s' if len(unknown) > 1 else ''} "
+                            f"{', '.join(unknown)} - the sources are "
+                            f"{', '.join(known)}"
+                        )
+                    }
+                ), 400
+            cleaned["sources"] = ",".join(dict.fromkeys(wanted))
+
         if name == "set_param":
             # The whitelist and the ranges live in `tuning.py`, mirrored from the
             # vessel's own copy. Refusing here means the operator gets the reason
@@ -1613,6 +1740,30 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                 return jsonify(  # type: ignore[return-value]
                     {"error": f"'fps' must be between {MIN_LIGHTS_FPS:g} and {MAX_LIGHTS_FPS:g}"}
                 ), 400
+
+        if name == "set_lights_servos":
+            # Refused, not clamped, and per side because the two travels are
+            # mirrored. The vessel refuses independently and its answer is the
+            # real one; this is here so a slider that has somehow got outside its
+            # own bounds says so before a servo is asked to drive into a stop.
+            limits = _lights_servo_limits()
+            for side, bounds in limits.items():
+                angle = cleaned[side]
+                if not math.isfinite(angle):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": f"'{side}' must be an angle in degrees"}
+                    ), 400
+                if not bounds["min"] <= angle <= bounds["max"]:
+                    return jsonify(  # type: ignore[return-value]
+                        {
+                            "error": (
+                                f"'{side}' must be {bounds['min']:g}..{bounds['max']:g}° "
+                                f"({bounds['closed']:g}° closed, {bounds['open']:g}° open) "
+                                "- past an endpoint the cover is driving into its stop"
+                            )
+                        }
+                    ), 400
+                cleaned[side] = round(angle)
 
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
         level = spec.get("log_level") or ("ERROR" if spec.get("danger") else "INFO")

@@ -19,6 +19,10 @@ export const ROLE_ORDER = [
   'transit',
   'buoys',
   'avoid',
+  'collision_front',
+  'collision_right',
+  'collision_front_backup',
+  'collision_right_backup',
   'hold',
   'dock',
   'dock_parallel',
@@ -47,6 +51,16 @@ export const ROLE_STYLE = {
   transit: { colour: '#8fa8cf', code: 'T', short: 'Transit' },
   buoys: { colour: '#4fd1c5', code: 'B', short: 'Buoy rules' },
   avoid: { colour: '#ff7a45', code: 'A', short: 'Avoidance' },
+  // The four Task 2 roles share the avoidance hue for the same reason the
+  // parking roles borrow the docking one: a chart read over someone's shoulder
+  // should say "this is the collision leg" first and "by which method" second.
+  // The letters do the telling apart, and the two BLIND backups are deliberately
+  // the loudest thing in the palette -- a role that manoeuvres whether or not
+  // anything is there must never be left on a course by accident.
+  collision_front: { colour: '#ff7a45', code: 'F', short: 'Collision, ahead' },
+  collision_right: { colour: '#ff7a45', code: 'R', short: 'Collision, starboard' },
+  collision_front_backup: { colour: '#ff3b30', code: 'F!', short: 'BLIND ahead' },
+  collision_right_backup: { colour: '#ff3b30', code: 'R!', short: 'BLIND starboard' },
   hold: { colour: '#b48ef7', code: 'H', short: 'Hold' },
   dock: { colour: '#ffd23f', code: 'D', short: 'Dock' },
   dock_parallel: { colour: '#f78ec6', code: 'P', short: 'Parallel dock' },
@@ -131,6 +145,12 @@ const ROLE_WORDS = {
   colregs: 'avoid',
   collision: 'avoid',
   otter: 'avoid',
+  collision_front: 'collision_front',
+  collision_right: 'collision_right',
+  collision_front_backup: 'collision_front_backup',
+  collision_right_backup: 'collision_right_backup',
+  front: 'collision_front',
+  right: 'collision_right',
   hold: 'hold',
   stop: 'hold',
   station: 'hold',

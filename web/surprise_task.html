@@ -1,0 +1,1501 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>surprise task — ligmax</title>
+
+<!--
+  NJORD's surprise task, end to end, on one page.
+
+  The task, as revised 2026-08-13 (`suprice_task.jpg`, `gps points 13.08.xlsx`):
+  run in, park ALONGSIDE, leave the berth, run a ring of red/green gates staying
+  INSIDE the five cardinal marks 4.1-4.5, then dock BOW-IN and stay there. The task
+  still ends inside the final dock - there is no exit from it - but the two dockings
+  have swapped ends since 12 Aug, the handout is six points rather than five and all
+  six coordinates moved, and the five crosshairs on the sketch turn out to be the
+  cardinals rather than the GPS points. docs/findings.md item 41.
+
+  Three things that follow from "it is a ring", all of them course-level and all of
+  them sent with the plan rather than configured on the boat:
+
+  * **`buoyage: "route"`.** A closed loop run once visits every compass bearing, so
+    the venue's fixed north reference plus a 135 deg window cannot describe it - and
+    under the old rule the 179 and 141 deg legs inverted red and green - two of the
+    three scored ring legs. The direction of travel is the direction of buoyage
+    instead.
+  * **`cardinal_rule: "inside"`.** The marks ring the outside of the loop and the
+    instruction is to stay inside them, which is a different statement from NJORD
+    10.3's "pass on the mark's own safe side". It also means no topmark has to be
+    classified, which on this boat is the difference between the rule working and
+    the rule waiting for a vote that never lands.
+  * **`park_no_exit` on the last waypoint, and it reaches the vessel now.** It did
+    not before: `ligmax_gui/plan.py` built its cleaned waypoint field by field and
+    this one was in neither the list nor the tests, so the flag this page has always
+    sent was dropped on the ground station and the boat reversed out of the berth
+    the run is supposed to end in.
+
+  A sixth page, same treatment as /dock and /led_control: one file, no shared
+  frontend modules, read gate like every other page and the admin gate per command.
+  It polls /api/session, /api/snapshot and /api/camera/*, and sends through
+  /api/command, so it needs no endpoint of its own.
+
+  Why it is not three more panels on /control or a variant of /dock:
+
+  * **It is both dockings and the buoy legs in one run.** /dock is deliberately
+    Task 3 and nothing else - no marks, no world model - and this task is a docking,
+    then a buoy course, then a different docking, without a pause between them where
+    somebody could change pages.
+  * **The mark source is now a decision, and it is this page's whole reason.** Both
+    lidars are dead, so `world.absorb_detections` has nothing posing questions for
+    the cameras to answer and a `buoys` waypoint silently degrades to blind GNSS
+    transit. `set_mark_source` opens the one exception that fixes that, and choosing
+    between the YOLO and the colour test is a thing an operator does while looking
+    at what each of them currently claims.
+  * **The colour test needs to be watched, not trusted.** The mask below is the same
+    hue and saturation windows the vessel colours the lidar with
+    (`self_driving/config.py`), painted over the live frame, so the thresholds can be
+    checked against the day's light before the boat is asked to steer on them.
+  * **The colour radar** (2026-08-13) is the same test read a different way: the one
+    row of each frame where the dead front lidar's returns would have landed, fanned
+    out by bearing so "red off the starboard bow" is one glance rather than two
+    pictures. Bearing only - a single row carries no range.
+
+  Read the mask honestly: it is computed HERE, in the browser, off the uplinked
+  preview. The vessel runs the same windows on its own full-resolution frame at its
+  own moment, so this is the right instrument for "are the thresholds sane in this
+  light" and the wrong one for "which mark did the boat act on" - that is the chart
+  and the log.
+
+  Everything on this page is untested against a real vessel (2026-08-12).
+-->
+
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d131f;
+    --panel-2: #0a0f19;
+    --ink: #d7e3f5;
+    --dim: #7d8ea8;
+    --line: #1b2941;
+    --accent: #7fd4ff;
+    --warn: #f0b23c;
+    --bad: #e2453f;
+    --ok: #4fd07a;
+    --tag: #eb64eb;
+    --red: #e2453f;
+    --green: #4fd07a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 48px;
+  }
+  a { color: var(--accent); }
+
+  header#bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel-2);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20;
+  }
+  header#bar h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header#bar .spacer { flex: 1; }
+  header#bar nav { display: flex; gap: 10px; font-size: 12.5px; }
+  .pill {
+    padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--line); background: #101827; color: var(--dim);
+    white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: #1d4b30; }
+  .pill.warn { color: var(--warn); border-color: #4d3b16; }
+  .pill.bad { color: var(--bad); border-color: #4d1f1d; }
+
+  main { padding: 16px; display: grid; gap: 16px; max-width: 1600px; margin: 0 auto; }
+  @media (min-width: 1150px) { main { grid-template-columns: minmax(430px, 1fr) minmax(460px, 1.1fr); } }
+
+  section.card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px;
+  }
+  section.card > h2 {
+    margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--dim); font-weight: 600;
+  }
+  .span-2 { grid-column: 1 / -1; }
+
+  button, select, input {
+    font: inherit; color: var(--ink); background: #131c2c;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #2d4467; background: #18233a; }
+  button:disabled, input:disabled, select:disabled { opacity: .42; cursor: not-allowed; }
+  button.primary { background: #14344d; border-color: #276d94; color: #d6f1ff; }
+  button.primary:hover:not(:disabled) { background: #18415f; }
+  button.danger { background: #3a1513; border-color: #7d2a26; color: #ffd9d6; }
+  button.small { padding: 3px 7px; font-size: 12px; }
+  input[type="number"], input.coord { font-variant-numeric: tabular-nums; }
+  input[type="range"] { padding: 0; }
+
+  .muted { color: var(--dim); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  #figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
+  .fig { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .fig .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  .fig .v { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.25; }
+  .fig .u { font-size: 12px; color: var(--dim); font-weight: 400; }
+  .fig.ok .v { color: var(--ok); }
+  .fig.warn .v { color: var(--warn); }
+  .fig.bad .v { color: var(--bad); }
+
+  /* -- the five waypoint slots ------------------------------------------- */
+  .slot { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: var(--panel-2); margin-bottom: 8px; }
+  .slot.is-target { border-color: #276d94; box-shadow: 0 0 0 1px #276d9455 inset; }
+  .slot .head { display: flex; gap: 8px; align-items: baseline; }
+  .slot h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .slot .role { font-size: 11px; color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  .slot .hint { font-size: 11.5px; color: var(--dim); margin: 2px 0 7px; }
+  .slot .coords { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .slot label { display: block; font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+  .slot input.coord { width: 100%; }
+
+  table.kv { width: 100%; border-collapse: collapse; }
+  table.kv td { padding: 2px 0; vertical-align: top; }
+  table.kv td.k { color: var(--dim); width: 46%; padding-right: 8px; }
+  table.kv td.v { font-variant-numeric: tabular-nums; }
+
+  table.tags { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  table.tags th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); font-weight: 600; padding: 3px 6px 3px 0; }
+  table.tags td { padding: 2px 6px 2px 0; }
+  .tagchip { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: #33113322; border: 1px solid var(--tag); color: var(--tag); font-weight: 600; padding: 0 4px; }
+
+  canvas#chart { width: 100%; height: auto; display: block; background: #050810; border-radius: 8px; border: 1px solid var(--line); }
+  #chart-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11.5px; color: var(--dim); }
+
+  /* -- the colour radar -------------------------------------------------- */
+  canvas#radar {
+    width: 100%; max-width: 460px; height: auto; display: block; margin: 0 auto;
+    background: #050810; border-radius: 50%; border: 1px solid var(--line);
+  }
+  #radar-readout { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; font-variant-numeric: tabular-nums; }
+
+  /* -- the camera pair, with the colour mask over it ---------------------- */
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cams figure { margin: 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .camwrap { position: relative; line-height: 0; }
+  .camwrap img { width: 100%; display: block; background: #04060c; min-height: 90px; }
+  .camwrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .cams figcaption { font-size: 11px; color: var(--dim); padding: 4px 7px; display: flex; justify-content: space-between; gap: 6px; }
+
+  .modes { display: flex; gap: 6px; flex-wrap: wrap; }
+  button.on, .modes button.on { background: #14344d; border-color: #276d94; color: #d6f1ff; }
+
+  /* The verdict strip: what the rule would do with what is on screen. */
+  #verdict { margin-top: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); padding: 10px; }
+  #verdict .big { font-size: 15px; font-weight: 600; }
+  #verdict.ok { border-color: #1d4b30; }
+  #verdict.bad { border-color: #4d1f1d; }
+  .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .sidebox { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  .sidebox .t { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  .bar { height: 6px; border-radius: 3px; background: #131c2c; margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; }
+
+  .note { border-left: 3px solid var(--line); padding: 6px 0 6px 9px; margin: 8px 0 0; font-size: 12px; color: var(--dim); }
+  .note.warn { border-left-color: var(--warn); }
+  .note.bad { border-left-color: var(--bad); }
+
+  #toast {
+    display: none; position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: 18px; background: #101827; border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 14px; z-index: 50; max-width: 92vw;
+  }
+</style>
+
+<header id="bar">
+  <h1>surprise task</h1>
+  <span class="pill" id="pill-status">—</span>
+  <span class="pill" id="pill-mode">—</span>
+  <span class="pill" id="pill-fix">—</span>
+  <span class="pill" id="pill-marks">—</span>
+  <span class="pill" id="pill-source">—</span>
+  <span class="pill" id="pill-link">—</span>
+  <span class="spacer"></span>
+  <span class="pill" id="pill-admin">—</span>
+  <nav><a href="/">overview</a><a href="/control">control</a><a href="/dock">dock</a></nav>
+</header>
+
+<main>
+  <section class="card span-2">
+    <h2>The run</h2>
+    <div id="figures"></div>
+    <p class="note" id="reason">—</p>
+  </section>
+
+  <section class="card">
+    <h2>Mark source — what the boat may steer on</h2>
+    <div class="modes">
+      <button class="admin-only" id="mode-colour" data-sources="colour">Colour</button>
+      <button class="admin-only" id="mode-yolo" data-sources="yolo">YOLO</button>
+      <button class="admin-only" id="mode-both" data-sources="colour,yolo">Both</button>
+      <button class="admin-only" id="mode-off" data-sources="">Off</button>
+    </div>
+    <p class="note" id="source-note">—</p>
+    <p class="note warn">
+      With both lidars down the world model has no marks unless one of these is on:
+      <code>buoys</code> then degrades to blind GNSS transit, quietly. Off is the
+      vessel default, and it is the honest setting for a run nobody has watched the
+      mask on yet.
+    </p>
+
+    <h2 style="margin-top:14px">Which side do the marks go?</h2>
+    <div class="row">
+      <button class="small" id="side-port" data-side="port">Red to port</button>
+      <button class="small" id="side-stbd" data-side="starboard">Red to starboard</button>
+    </div>
+    <p class="note bad" id="side-note">
+      <b>This switch only changes the verdict shown on this page, never the boat.</b>
+      The course above is sent as <code>buoyage: "route"</code>, so the vessel takes
+      red to port and green to starboard on <b>every</b> leg — the direction of
+      travel is the direction of buoyage, and the venue's 135° inversion does not
+      apply to a ring. That is what the brute-force rule already does: a red seen to
+      starboard shifts the aim point to starboard, a green seen to port shifts it to
+      port. Leave this on <i>red to port</i> unless the jury says otherwise, and if
+      they do, change the plan and not just this switch.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Course — GPS 13 to 18, in the handed-out order</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="small" id="btn-load">Load the handout</button>
+      <button class="small" id="btn-clear">Clear</button>
+      <span class="muted" id="course-summary">—</span>
+    </div>
+    <div id="slots"></div>
+    <div class="row" style="margin-top:6px">
+      <button class="primary admin-only" id="btn-send-plan">Send course</button>
+      <button class="admin-only" id="btn-arm">Arm</button>
+      <button class="primary admin-only" id="btn-start">Engage autonomy</button>
+      <button class="admin-only" id="btn-stop">Disengage</button>
+      <button class="danger admin-only" id="btn-estop">E-STOP</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="small admin-only" id="btn-pause">Pause</button>
+      <button class="small admin-only" id="btn-resume">Resume</button>
+      <button class="small admin-only" id="btn-back">Back one</button>
+      <button class="small admin-only" id="btn-skip">Skip one</button>
+      <span class="spacer"></span>
+      <label class="muted" for="speed-input">speed cap</label>
+      <input type="number" id="speed-input" step="0.1" min="0.1" max="2.57" value="0.8" style="width:82px">
+      <button class="small admin-only" id="btn-speed">Set</button>
+    </div>
+  </section>
+
+  <section class="card span-2">
+    <h2>Colour mode — the mask the vessel colours the lidar with</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="small admin-only" id="btn-video">Turn video on</button>
+      <label class="muted" for="cam-width">width</label>
+      <select id="cam-width"><option>320</option><option selected>480</option><option>640</option></select>
+      <label class="muted" for="cam-fps">fps</label>
+      <select id="cam-fps"><option>1</option><option selected>2</option><option>5</option></select>
+      <span class="spacer"></span>
+      <button class="small" id="btn-mask">Mask on</button>
+      <span class="muted" id="cam-status">—</span>
+    </div>
+
+    <div class="row" style="margin-bottom:8px">
+      <label class="muted" for="line-input">lidar line</label>
+      <input type="range" id="line-input" min="0" max="95" value="45" style="flex:1;min-width:160px">
+      <span class="muted" id="line-readout">45 % down the frame</span>
+    </div>
+    <p class="note">
+      Nothing above that line is counted. The lidar's plane projects to a row in
+      each frame and everything below it is the near water where the marks are;
+      above it is shoreline, trees and the far side of the fjord, which are the
+      things that put a red blob where no buoy is. Set it by eye against the
+      horizon — it is a page control, not a vessel setting, and the vessel's own
+      cut is <code>colour_marks.py</code>'s.
+    </p>
+
+    <div class="cams">
+      <figure>
+        <div class="camwrap">
+          <img id="cam0" alt="camera 0">
+          <canvas id="mask0"></canvas>
+        </div>
+        <figcaption><span>cam 0 — port</span><span id="cam0-age">—</span></figcaption>
+      </figure>
+      <figure>
+        <div class="camwrap">
+          <img id="cam1" alt="camera 1">
+          <canvas id="mask1"></canvas>
+        </div>
+        <figcaption><span>cam 1 — starboard</span><span id="cam1-age">—</span></figcaption>
+      </figure>
+    </div>
+
+    <div id="verdict">
+      <div class="big" id="verdict-text">turn the video on to see the mask</div>
+      <div class="muted" id="verdict-detail">—</div>
+      <div class="sides">
+        <div class="sidebox">
+          <div class="t">to port</div>
+          <div id="port-counts">—</div>
+          <div class="bar"><i id="port-bar" style="width:0;background:var(--red)"></i></div>
+        </div>
+        <div class="sidebox">
+          <div class="t">to starboard</div>
+          <div id="stbd-counts">—</div>
+          <div class="bar"><i id="stbd-bar" style="width:0;background:var(--green)"></i></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Colour radar — the lidar line, laid out by bearing</h2>
+    <canvas id="radar" width="620" height="620"></canvas>
+    <div class="row" style="margin-top:10px">
+      <button class="small" id="btn-stab">Stabilised</button>
+      <label for="fov-input" class="muted">field of view</label>
+      <input type="number" id="fov-input" min="60" max="200" step="5" value="150" style="width:74px">
+      <span class="muted">°/camera</span>
+      <label for="band-input" class="muted">band</label>
+      <input type="number" id="band-input" min="1" max="40" step="1" value="9" style="width:64px">
+      <span class="muted">px</span>
+    </div>
+    <div id="radar-readout">
+      <div class="sidebox">
+        <div class="t">to port</div>
+        <div id="radar-port">—</div>
+      </div>
+      <div class="sidebox">
+        <div class="t">to starboard</div>
+        <div id="radar-stbd">—</div>
+      </div>
+    </div>
+    <p class="note" id="radar-note">—</p>
+  </section>
+
+  <section class="card">
+    <h2>Chart</h2>
+    <canvas id="chart" width="900" height="900"></canvas>
+    <div id="chart-legend">
+      <span><b style="color:var(--accent)">■</b> boat</span>
+      <span><b style="color:#c9d6ea">■</b> waypoints</span>
+      <span><b style="color:var(--red)">■</b> red mark</span>
+      <span><b style="color:var(--green)">■</b> green mark</span>
+      <span><b style="color:var(--tag)">■</b> berth</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Berth — the AR tags, both dockings</h2>
+    <table class="kv" id="berth-kv"></table>
+    <table class="tags" id="tags-table" style="margin-top:10px"></table>
+    <p class="note" id="berth-note">—</p>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const POLL_MS = 500;
+
+  // The handout, `gps points 13.08.xlsx`, read in the order the organisers listed
+  // them - which they confirmed IS the navigation order, and which does NOT match
+  // the 4.1-4.5 numbering on the sketch (those five are the CARDINAL MARKS, not
+  // GPS points; see docs/findings.md item 41).
+  //
+  // SIX points now, and all six coordinates moved: the 12 Aug handout's five are
+  // superseded. Against them, new 14 is 2.7 m off old 17 and new 18 is 3.0 m off
+  // old 14, which is where the two probe bearings below come from.
+  //
+  // A convenience only: type over them if the numbers on the day differ.
+  const HANDOUT = {
+    13: { lat: 63.441135, lon: 10.424155 },
+    14: { lat: 63.441063, lon: 10.424141 },
+    15: { lat: 63.441155, lon: 10.423620 },
+    16: { lat: 63.440927, lon: 10.423630 },
+    17: { lat: 63.440810, lon: 10.423840 },
+    18: { lat: 63.440950, lon: 10.423950 },
+  };
+
+  // The roles are fixed here rather than chosen, because the task text fixes them.
+  // Changed 2026-08-13: the PARALLEL docking is now first and the bow-in one last -
+  // the reverse of the 12 Aug reading - and the ring between them is three legs
+  // rather than two. The tag roles are the only docking roles with a sensor while
+  // both lidars are down.
+  const SLOTS = [
+    { id: 13, role: 'transit', title: '13 — run-in',
+      hint: 'Autonomy is engaged here, so NJORD §8.1\'s clock starts here. 8.0 m at 185° to the first berth.' },
+    { id: 14, role: 'park_tag_parallel', title: '14 — ALONGSIDE docking, first', hold: 10, probe: 148,
+      hint: 'Task step one, and it is the parallel one. Entered bow-first down the normal, then turned 90° inside the berth. Lay it on the centreline, within ~3 m of the mouth.' },
+    { id: 15, role: 'buoys', title: '15 — ring leg',
+      hint: '27.9 m at 291° out of the berth, and the longest leg on the course. Only obeys the marks if a mark source is on.' },
+    { id: 16, role: 'buoys', title: '16 — ring leg',
+      hint: '25.2 m at 179°, and the point moved 12 m on 13 Aug. At 179° the venue buoyage rule inverts red and green — buoyage "route" is what stops it.' },
+    { id: 17, role: 'buoys', title: '17 — ring leg',
+      hint: '16.6 m at 141°, which inverts under the venue rule as well. 1.7 m off the 12 Aug handout\'s GPS 13.' },
+    { id: 18, role: 'park_tag', title: '18 — BOW-IN docking, the end', hold: 10, probe: 86, noExit: true,
+      hint: 'Forward in, and the run ENDS INSIDE it (park_no_exit) — the boat holds the berth instead of reversing out. 16.4 m at 020° in.' },
+  ];
+
+  // The two rules that are the course's rather than a waypoint's, sent with every
+  // upload. `buoyage: "route"` makes the direction of travel the direction of
+  // buoyage, so red stays to port and green to starboard on all five legs instead
+  // of inverting on the three that run back south - two of which are scored. `cardinal_rule: "inside"` passes
+  // the cardinals inside the loop, which is the jury's instruction and which also
+  // means their topmarks never have to be classified. Both are refused by the
+  // vessel if it is older than 2026-08-13, which is the intended failure: a boat
+  // that cannot obey them must not silently fly the channel rule instead.
+  const COURSE_RULES = { buoyage: 'route', cardinal_rule: 'inside' };
+
+  // The vessel's own hue and saturation windows, `self_driving/config.py`. Kept in
+  // step by hand, and that is a real cost - but the alternative is an endpoint whose
+  // only job is to ship four numbers, and being wrong here shows itself instantly as
+  // a mask that disagrees with the boat's own marks.
+  const HUE_RED_LOW_MAX = 20.0, HUE_RED_HIGH_MIN = 335.0;
+  const HUE_GREEN_MIN = 62.0, HUE_GREEN_MAX = 200.0;
+  const MIN_SAT_RED = 0.55, MIN_SAT_GREEN = 0.22;
+
+  // Enough of a blob to be a mark rather than a glint, as a fraction of the
+  // counted region. A 40 cm buoy at 20 m is a handful of pixels in a 480 px
+  // preview, so this is deliberately small; what it is really rejecting is the
+  // single-pixel speckle that any saturation threshold produces on moving water.
+  const MIN_BLOB_FRACTION = 0.0006;
+
+  let admin = false;
+  let session = null;
+  let snap = null;
+  let lastFrameAt = 0;
+  let videoOn = false;
+  let maskOn = true;
+  let passSide = 'port';        // this page's reading of which side red goes
+  let sources = null;           // what the vessel says is in force
+  const points = {};            // waypoint id -> {lat, lon}
+  const trail = [];
+  const counts = { 0: null, 1: null };   // per camera, last mask result
+
+  // ------------------------------------------------------------------ helpers
+
+  function toast(message, kind) {
+    const el = $('toast');
+    el.textContent = message;
+    el.style.display = 'block';
+    el.style.borderColor = kind === 'bad' ? '#7d2a26' : kind === 'ok' ? '#1d4b30' : '#2d4467';
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.style.display = 'none'; }, 4200);
+  }
+
+  function num(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  function dig(root, path) {
+    let node = root;
+    for (const part of path.split('.')) {
+      if (node === null || node === undefined) return undefined;
+      node = node[part];
+    }
+    return node;
+  }
+
+  const tel = (path) => dig(snap, `telemetry.${path}`);
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function postCommand(name, args) {
+    const res = await fetch('/api/command', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, args: args || {} }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function run(label, name, args) {
+    if (!admin) return;
+    try {
+      await postCommand(name, args);
+      toast(`${label} sent`, 'ok');
+    } catch (err) {
+      toast(`${label} refused: ${err.message}`, 'bad');
+    }
+  }
+
+  // ------------------------------------------------------------------- course
+
+  function buildSlots() {
+    $('slots').innerHTML = SLOTS.map((slot) => `
+      <div class="slot" data-id="${slot.id}">
+        <div class="head">
+          <h3>${escapeHtml(slot.title)}</h3>
+          <span class="role">${escapeHtml(slot.role)}</span>
+        </div>
+        <div class="hint">${escapeHtml(slot.hint)}</div>
+        <div class="coords">
+          <div><label for="lat-${slot.id}">latitude</label>
+            <input class="coord" id="lat-${slot.id}" inputmode="decimal" placeholder="63.440…"></div>
+          <div><label for="lon-${slot.id}">longitude</label>
+            <input class="coord" id="lon-${slot.id}" inputmode="decimal" placeholder="10.423…"></div>
+        </div>
+      </div>`).join('');
+    for (const slot of SLOTS) {
+      for (const which of ['lat', 'lon']) {
+        $(`${which}-${slot.id}`).addEventListener('input', () => { readSlots(); paintCourse(); });
+      }
+    }
+  }
+
+  function loadHandout() {
+    for (const slot of SLOTS) {
+      $(`lat-${slot.id}`).value = HANDOUT[slot.id].lat.toFixed(6);
+      $(`lon-${slot.id}`).value = HANDOUT[slot.id].lon.toFixed(6);
+    }
+    readSlots();
+    paintCourse();
+    toast('loaded the handed-out GPS 13-18 (13.08)', 'ok');
+  }
+
+  function readSlots() {
+    for (const slot of SLOTS) {
+      const lat = parseFloat($(`lat-${slot.id}`).value);
+      const lon = parseFloat($(`lon-${slot.id}`).value);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) points[slot.id] = { lat, lon };
+      else delete points[slot.id];
+    }
+  }
+
+  function buildPlan() {
+    const waypoints = [];
+    for (const slot of SLOTS) {
+      const point = points[slot.id];
+      if (!point) return null;
+      const waypoint = {
+        name: String(slot.id), lat: point.lat, lon: point.lon, role: slot.role,
+      };
+      if (slot.hold !== undefined) waypoint.hold_s = slot.hold;
+      if (slot.probe !== undefined) waypoint.park_probe_deg = slot.probe;
+      // The clarification, on the one waypoint it applies to: the task ends inside
+      // the final berth. Carried on the slot rather than keyed off the role, which
+      // is what it was until 2026-08-13 — the roles have since swapped ends, and a
+      // rule of the form "the parallel one stays in" would have quietly moved the
+      // flag to the first docking and reversed the boat out of the last.
+      if (slot.noExit) waypoint.park_no_exit = true;
+      waypoints.push(waypoint);
+    }
+    return { name: 'surprise-task', ...COURSE_RULES, waypoints };
+  }
+
+  function legs() {
+    const out = [];
+    for (let i = 1; i < SLOTS.length; i += 1) {
+      const from = points[SLOTS[i - 1].id];
+      const to = points[SLOTS[i].id];
+      if (!from || !to) continue;
+      const dn = (to.lat - from.lat) * 110574;
+      const de = (to.lon - from.lon) * 111320 * Math.cos(from.lat * Math.PI / 180);
+      out.push({
+        from: SLOTS[i - 1].id, to: SLOTS[i].id,
+        m: Math.hypot(de, dn),
+        deg: (Math.atan2(de, dn) * 180 / Math.PI + 360) % 360,
+      });
+    }
+    return out;
+  }
+
+  function paintCourse() {
+    const list = legs();
+    if (!list.length) { $('course-summary').textContent = 'no legs yet'; return; }
+    const total = list.reduce((sum, leg) => sum + leg.m, 0);
+    $('course-summary').textContent =
+      `${list.length + 1} points, ${total.toFixed(0)} m: `
+      + list.map((leg) => `${leg.m.toFixed(0)} m @ ${leg.deg.toFixed(0)}°`).join(' · ');
+
+    const target = num(tel('autopilot.plan.index'));
+    for (const slot of SLOTS) {
+      const el = document.querySelector(`.slot[data-id="${slot.id}"]`);
+      if (el) el.classList.toggle('is-target', target !== null && SLOTS.indexOf(slot) === target);
+    }
+  }
+
+  // ------------------------------------------------------------------ figures
+
+  const FIGURES = [
+    { k: 'Phase', get: () => tel('autopilot.phase') || null, text: true },
+    { k: 'Waypoint', get: () => tel('autopilot.plan.current') || null, text: true },
+    { k: 'Role', get: () => tel('autopilot.plan.role') || null, text: true },
+    { k: 'To waypoint', get: () => num(tel('autopilot.distance_to_waypoint')), digits: 1, unit: 'm' },
+    { k: 'Hold left', get: () => num(tel('autopilot.hold_remaining_s')), digits: 1, unit: 's' },
+    { k: 'Speed', get: () => num(tel('speed')), digits: 2, unit: 'm/s' },
+    { k: 'Marks', get: () => markTracks().length, digits: 0 },
+    { k: 'Tags', get: () => num(dig(tel('artags'), 'n')), digits: 0 },
+  ];
+
+  function paintFigures() {
+    $('figures').innerHTML = FIGURES.map((fig) => {
+      const value = fig.get();
+      const shown = value === null || value === undefined ? '—'
+        : fig.text ? escapeHtml(value)
+        : `${Number(value).toFixed(fig.digits)}<span class="u"> ${fig.unit || ''}</span>`;
+      return `<div class="fig"><div class="k">${escapeHtml(fig.k)}</div><div class="v">${shown}</div></div>`;
+    }).join('');
+    const reason = tel('autopilot.reason');
+    $('reason').textContent = reason ? String(reason) : '—';
+  }
+
+  function markTracks() {
+    const tracks = dig(snap, 'tracks');
+    if (!Array.isArray(tracks)) return [];
+    // 1 RED, 2 GREEN in the shared obstacle table (`ligmax_gui/protocol.py`).
+    return tracks.filter((t) => t && (t.type === 1 || t.type === 2));
+  }
+
+  // -------------------------------------------------------------- the mask
+  //
+  // The same two windows the vessel classifies a coloured lidar return with, run
+  // over the uplinked preview below the lidar line. Hue and saturation, not RGB
+  // distance, for the reason `perception/classify.py` gives: absolute RGB drifts
+  // with exposure and between the two cameras, and hue survives both.
+
+  function classify(r, g, b) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const value = max / 255;
+    if (value <= 0.04) return 0;              // black: no colour to speak of
+    const sat = max === 0 ? 0 : (max - min) / max;
+    const chroma = max - min;
+    if (chroma === 0) return 0;               // grey
+    let hue;
+    if (max === r) hue = 60 * (((g - b) / chroma) % 6);
+    else if (max === g) hue = 60 * ((b - r) / chroma + 2);
+    else hue = 60 * ((r - g) / chroma + 4);
+    if (hue < 0) hue += 360;
+    if (sat >= MIN_SAT_RED && (hue <= HUE_RED_LOW_MAX || hue >= HUE_RED_HIGH_MIN)) return 1;
+    if (sat >= MIN_SAT_GREEN && hue >= HUE_GREEN_MIN && hue <= HUE_GREEN_MAX) return 2;
+    return 0;
+  }
+
+  const work = document.createElement('canvas');
+
+  /** Count red and green either side of the frame's centre, below the line. */
+  function analyse(cam) {
+    const img = $(`cam${cam}`);
+    const overlay = $(`mask${cam}`);
+    if (!img.naturalWidth || !img.naturalHeight) return null;
+
+    // Downsampled deliberately: this runs twice a second on a ground station that
+    // is also drawing the chart, and a 480 px preview has far more pixels than the
+    // question needs. The stride is in the sampled space, so the mask drawn back is
+    // blocky by exactly the amount the count is approximate by.
+    const width = Math.min(240, img.naturalWidth);
+    const height = Math.round(img.naturalHeight * (width / img.naturalWidth));
+    work.width = width; work.height = height;
+    const wctx = work.getContext('2d', { willReadFrequently: true });
+    wctx.drawImage(img, 0, 0, width, height);
+    let data;
+    try {
+      data = wctx.getImageData(0, 0, width, height);
+    } catch (err) {
+      // Same-origin, so this should not happen - but a tainted canvas is silent
+      // otherwise, and a mask that is quietly absent reads as "no buoys in view".
+      return { blocked: true };
+    }
+
+    const cut = Math.round(height * (parseInt($('line-input').value, 10) / 100));
+    const mid = width / 2;
+    const out = { red: [0, 0], green: [0, 0], counted: 0, cut, width, height };
+    const px = data.data;
+    for (let y = cut; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = (y * width + x) * 4;
+        out.counted += 1;
+        const kind = classify(px[i], px[i + 1], px[i + 2]);
+        if (kind === 0) { px[i + 3] = 0; continue; }
+        const side = x < mid ? 0 : 1;          // 0 port half, 1 starboard half
+        if (kind === 1) out.red[side] += 1; else out.green[side] += 1;
+        // Paint the classified pixel back in its own colour so the operator sees
+        // exactly what was counted, rather than a number they have to trust.
+        px[i] = kind === 1 ? 226 : 79;
+        px[i + 1] = kind === 1 ? 69 : 208;
+        px[i + 2] = kind === 1 ? 63 : 122;
+        px[i + 3] = 210;
+      }
+    }
+    // Everything above the line is not counted and is shown as not counted.
+    for (let y = 0; y < cut; y += 1) {
+      for (let x = 0; x < width; x += 1) px[(y * width + x) * 4 + 3] = 0;
+    }
+
+    overlay.width = width; overlay.height = height;
+    const octx = overlay.getContext('2d');
+    octx.clearRect(0, 0, width, height);
+    if (maskOn) octx.putImageData(data, 0, 0);
+    octx.strokeStyle = '#7fd4ff'; octx.lineWidth = 1;
+    octx.beginPath(); octx.moveTo(0, cut + 0.5); octx.lineTo(width, cut + 0.5); octx.stroke();
+    octx.strokeStyle = '#7fd4ff55';
+    octx.beginPath(); octx.moveTo(mid, cut); octx.lineTo(mid, height); octx.stroke();
+    return out;
+  }
+
+  function paintMask() {
+    for (const cam of [0, 1]) counts[cam] = videoOn ? analyse(cam) : null;
+    // Same frames, same hue windows, different question - so it is redrawn from
+    // here rather than off the poll: the radar and the mask must never be reading
+    // two different frames, or a blip and a mask that disagree would be the link's
+    // fault and look like the thresholds'.
+    paintRadar();
+
+    const live = [counts[0], counts[1]].filter((c) => c && !c.blocked);
+    if (!live.length) {
+      $('verdict').className = '';
+      $('verdict-text').textContent = videoOn
+        ? 'waiting for a frame' : 'turn the video on to see the mask';
+      $('verdict-detail').textContent = '—';
+      $('port-counts').textContent = '—';
+      $('stbd-counts').textContent = '—';
+      $('port-bar').style.width = '0';
+      $('stbd-bar').style.width = '0';
+      return;
+    }
+
+    // cam 0 is port and cam 1 starboard, ±75° apart, so a blob in cam 0's left half
+    // is well off the port bow and one in cam 1's right half is well off the
+    // starboard bow. Summing the two cameras' halves is the crudest possible fusion
+    // and it is the right one for this question: the rule only needs a side.
+    const counted = live.reduce((sum, c) => sum + c.counted, 0) || 1;
+    const port = { red: 0, green: 0 }, stbd = { red: 0, green: 0 };
+    for (const cam of [0, 1]) {
+      const c = counts[cam];
+      if (!c || c.blocked) continue;
+      // Camera 0 looks to port: both its halves are to port of the bow, and only
+      // its inner (right) half is anywhere near ahead. Camera 1 mirrors that.
+      if (cam === 0) { port.red += c.red[0] + c.red[1]; port.green += c.green[0] + c.green[1]; }
+      else { stbd.red += c.red[0] + c.red[1]; stbd.green += c.green[0] + c.green[1]; }
+    }
+
+    const floor = counted * MIN_BLOB_FRACTION;
+    const wrongPort = passSide === 'port' ? port.green : port.red;
+    const wrongStbd = passSide === 'port' ? stbd.red : stbd.green;
+    const wrongPortName = passSide === 'port' ? 'green' : 'red';
+    const wrongStbdName = passSide === 'port' ? 'red' : 'green';
+
+    const pct = (n) => `${(100 * n / counted).toFixed(2)} %`;
+    $('port-counts').innerHTML =
+      `red ${port.red} (${pct(port.red)})<br>green ${port.green} (${pct(port.green)})`;
+    $('stbd-counts').innerHTML =
+      `red ${stbd.red} (${pct(stbd.red)})<br>green ${stbd.green} (${pct(stbd.green)})`;
+    const scale = Math.max(1, port.red, port.green, stbd.red, stbd.green);
+    $('port-bar').style.width = `${100 * (passSide === 'port' ? port.red : port.green) / scale}%`;
+    $('port-bar').style.background = passSide === 'port' ? 'var(--red)' : 'var(--green)';
+    $('stbd-bar').style.width = `${100 * (passSide === 'port' ? stbd.green : stbd.red) / scale}%`;
+    $('stbd-bar').style.background = passSide === 'port' ? 'var(--green)' : 'var(--red)';
+
+    const nudges = [];
+    if (wrongPort > floor) nudges.push(`${wrongPortName} to port — would nudge to starboard`);
+    if (wrongStbd > floor) nudges.push(`${wrongStbdName} to starboard — would nudge to port`);
+
+    if (!nudges.length) {
+      $('verdict').className = 'ok';
+      $('verdict-text').textContent = `clear — nothing on the wrong side (red to ${passSide})`;
+      $('verdict-detail').textContent =
+        `${port.red + port.green + stbd.red + stbd.green} coloured pixels below the line, `
+        + `all of them on the side the rule wants.`;
+      return;
+    }
+    $('verdict').className = 'bad';
+    $('verdict-text').textContent = nudges.join('  ·  ');
+    $('verdict-detail').textContent =
+      'What the boat actually does is the chart and the log — this is the same test, '
+      + 'on a different frame at a different moment.';
+  }
+
+  // -------------------------------------------------------------- the radar
+  //
+  // "Just the colours it can see, round the boat." Not a mark finder and not the
+  // world model: it samples the ONE ROW of each camera frame where the front
+  // lidar's returns would have landed if the unit were alive, classifies it with
+  // the same two hue windows as the mask above, and lays the result out by
+  // bearing. The lidar line is the row worth sampling because everything the
+  // vessel has ever coloured a return with lives on it - a mark floats there, and
+  // the red on a jacket, a hull or a wet pontoon does not.
+  //
+  // BEARING ONLY, NO RANGE, and that is not a limitation to be fixed later. One
+  // row carries azimuth and nothing else; range would have to come from apparent
+  // size, which is a blob's property rather than a line's. So this answers "is
+  // there red off my starboard bow" - which is the question the brute-force rule
+  // asks and the one the operator needs at a glance - and it cannot answer "how
+  // far".
+  //
+  // Geometry, from `ligmax-edge/rig.json` (hand-measured, and the yaws confirmed
+  // 2026-08-12 to a tenth of a degree in RELATIVE register): the cameras are BACK
+  // TO BACK, not a forward pair. cam0 looks to PORT at yaw -75, cam1 to STARBOARD
+  // at +75, axes 150 deg apart, fields meeting across the bow. Which is why the
+  // default field of view is 150: it makes the two edges meet dead ahead exactly
+  // as the rig notes describe, and leaves a real 60 deg hole astern that this
+  // draws as a hole rather than as clear water. Nothing on this boat looks aft.
+  //
+  // The mapping from column to bearing is an EQUIDISTANT FISHEYE APPROXIMATION -
+  // degrees linear in pixels - because the real lens model is the calibration JSON
+  // on the Jetson and is not in git. The field-of-view box is there to be tuned by
+  // eye against something of known bearing. Read a blip's bearing as good to a few
+  // degrees, never better.
+
+  // Each camera's optical axis, degrees, positive to starboard. `rig.json`.
+  const CAM_YAW = { 0: -75.0, 1: +75.0 };
+
+  //: Where each camera's own coverage begins and ends is derived from these two
+  //: plus the field of view, so the blind sector is computed and not typed.
+  const RADAR_BIN_DEG = 3.0;
+
+  let stabilise = true;
+  const lineCanvas = document.createElement('canvas');
+
+  /** Hull roll and pitch in degrees, or nulls. The gimbal's residual first. */
+  function attitude() {
+    // `telemetry.gimbal` is the lidar gimbal's residual and is the right number
+    // when it exists - it is what is left after the mount has taken the motion
+    // out, so a stabilised camera needs a smaller correction than the hull's own
+    // attitude. The Pi does not publish that block yet (2026-08-13), which is why
+    // the hull is the fallback rather than the only source.
+    for (const [rollPath, pitchPath] of [
+      ['gimbal.roll', 'gimbal.pitch'],
+      ['attitude.roll_deg', 'attitude.pitch_deg'],
+      ['motion.roll', 'motion.pitch'],
+    ]) {
+      const roll = num(tel(rollPath)), pitch = num(tel(pitchPath));
+      if (roll !== null || pitch !== null) {
+        return { roll: roll || 0, pitch: pitch || 0, from: rollPath.split('.')[0] };
+      }
+    }
+    return { roll: null, pitch: null, from: null };
+  }
+
+  /**
+   * Classify the lidar line of one camera into `{bearing, kind}` samples.
+   *
+   * The line is placed by the same slider the mask draws, then moved by the hull's
+   * attitude when stabilisation is on: `shift` is the rotation about the camera's
+   * own right axis, which slides the horizon up and down, and `tilt` is the one
+   * about its forward axis, which rotates it. Both are projections of the hull's
+   * roll and pitch onto a camera looking 75 deg off the bow, so roll dominates and
+   * moves the two cameras' lines in OPPOSITE directions - which is exactly what a
+   * hull leaning to starboard does to a port-facing and a starboard-facing lens.
+   */
+  function sampleLine(cam) {
+    const img = $(`cam${cam}`);
+    if (!img.naturalWidth || !img.naturalHeight) return null;
+
+    const width = Math.min(320, img.naturalWidth);
+    const height = Math.round(img.naturalHeight * (width / img.naturalWidth));
+    lineCanvas.width = width; lineCanvas.height = height;
+    const lctx = lineCanvas.getContext('2d', { willReadFrequently: true });
+    lctx.drawImage(img, 0, 0, width, height);
+    let data;
+    try {
+      data = lctx.getImageData(0, 0, width, height);
+    } catch (err) {
+      return { blocked: true };
+    }
+
+    const fov = Math.max(60, Math.min(200, parseFloat($('fov-input').value) || 150));
+    const band = Math.max(1, Math.min(40, parseInt($('band-input').value, 10) || 9));
+    const degPerPx = fov / width;
+    const psi = CAM_YAW[cam] * Math.PI / 180;
+
+    const att = attitude();
+    let shiftPx = 0, tiltRad = 0;
+    if (stabilise && att.roll !== null) {
+      const shiftDeg = att.pitch * Math.cos(psi) - att.roll * Math.sin(psi);
+      shiftPx = shiftDeg / degPerPx;
+      tiltRad = (att.pitch * Math.sin(psi) + att.roll * Math.cos(psi)) * Math.PI / 180;
+    }
+    const baseRow = height * (parseInt($('line-input').value, 10) / 100);
+
+    const px = data.data;
+    const half = (band - 1) / 2;
+    const samples = [];
+    for (let x = 0; x < width; x += 1) {
+      const u = x - width / 2;
+      // The scene rotates opposite to the camera, so a tilt of `b` puts the
+      // horizon at `row - b*u`; see the block comment above for the derivation.
+      const centreRow = baseRow + shiftPx - tiltRad * u;
+      let red = 0, green = 0;
+      for (let d = -half; d <= half; d += 1) {
+        const y = Math.round(centreRow + d);
+        if (y < 0 || y >= height) continue;
+        const i = (y * width + x) * 4;
+        const kind = classify(px[i], px[i + 1], px[i + 2]);
+        if (kind === 1) red += 1; else if (kind === 2) green += 1;
+      }
+      if (!red && !green) continue;
+      samples.push({
+        bearing: CAM_YAW[cam] + (u / (width / 2)) * (fov / 2),
+        kind: red >= green ? 1 : 2,
+        strength: Math.max(red, green) / band,
+      });
+    }
+    return { samples, width, fov, from: att.from, stabilised: stabilise && att.roll !== null };
+  }
+
+  function paintRadar() {
+    const canvas = $('radar');
+    const ctx = canvas.getContext('2d');
+    const size = canvas.width;
+    const cx = size / 2, cy = size / 2, R = size / 2 - 10;
+    ctx.clearRect(0, 0, size, size);
+
+    // Bearing to canvas angle: 0 deg is the bow and the bow is up.
+    const ang = (bearing) => (bearing - 90) * Math.PI / 180;
+
+    const sweeps = [0, 1].map((cam) => (videoOn ? sampleLine(cam) : null));
+    const live = sweeps.filter((s) => s && !s.blocked && s.samples);
+    const fov = live.length ? live[0].fov
+      : Math.max(60, Math.min(200, parseFloat($('fov-input').value) || 150));
+
+    // The hole astern, drawn as a hole. Between the far edge of cam1's field and
+    // the far edge of cam0's, going the long way round the stern.
+    const edge = 75.0 + fov / 2;
+    if (edge < 180.0) {
+      ctx.fillStyle = '#0b1220';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, R, ang(edge), ang(360 - edge));
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#2c3a52';
+      ctx.font = '17px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('no camera aft', cx, cy + R * 0.80);
+      ctx.textAlign = 'start';
+    }
+
+    // The rings the blips sit between, and the four reference bearings.
+    ctx.strokeStyle = '#16233a'; ctx.lineWidth = 1;
+    for (const r of [0.60, 0.94]) {
+      ctx.beginPath(); ctx.arc(cx, cy, R * r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.strokeStyle = '#111c2e';
+    for (let bearing = 0; bearing < 360; bearing += 30) {
+      const a = ang(bearing);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * R * 0.20, cy + Math.sin(a) * R * 0.20);
+      ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#4a5a76'; ctx.font = '15px sans-serif'; ctx.textAlign = 'center';
+    for (const [bearing, label] of [[0, 'BOW'], [90, 'STBD'], [180, 'ASTERN'], [270, 'PORT']]) {
+      const a = ang(bearing);
+      ctx.fillText(label, cx + Math.cos(a) * R * 0.99 * 0.87, cy + Math.sin(a) * R * 0.87 + 5);
+    }
+    ctx.textAlign = 'start';
+
+    // One wedge per bin, the dominant colour of the samples that fell in it. Bins
+    // rather than one wedge per column so that a mark 40 cm across, which spans a
+    // handful of columns, reads as one blip instead of a picket fence.
+    const bins = new Map();
+    for (const sweep of live) {
+      for (const sample of sweep.samples) {
+        const key = Math.round(((sample.bearing % 360) + 360) % 360 / RADAR_BIN_DEG);
+        const bin = bins.get(key) || { red: 0, green: 0 };
+        if (sample.kind === 1) bin.red += sample.strength; else bin.green += sample.strength;
+        bins.set(key, bin);
+      }
+    }
+
+    let portRed = 0, portGreen = 0, stbdRed = 0, stbdGreen = 0;
+    for (const [key, bin] of bins) {
+      const bearing = key * RADAR_BIN_DEG;
+      const isRed = bin.red >= bin.green;
+      const weight = Math.max(bin.red, bin.green);
+      // Straight into the mark's own colour. The one thing this panel must never
+      // do is recolour a blip by what the rule thinks of it: the operator is here
+      // to check whether red really is where the boat says red is.
+      ctx.fillStyle = isRed ? '#e2453f' : '#4fd07a';
+      ctx.globalAlpha = Math.min(1, 0.35 + weight / 3);
+      const a0 = ang(bearing - RADAR_BIN_DEG / 2), a1 = ang(bearing + RADAR_BIN_DEG / 2);
+      ctx.beginPath();
+      ctx.arc(cx, cy, R * 0.94, a0, a1);
+      ctx.arc(cx, cy, R * 0.60, a1, a0, true);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+      // Port is bearing 180..360, starboard 0..180. A blip dead ahead or dead
+      // astern counts to starboard, which is arbitrary and says so: it is one bin
+      // of 3 deg and no rule turns on it.
+      const toPort = bearing > 180.0;
+      if (isRed) { if (toPort) portRed += 1; else stbdRed += 1; }
+      else if (toPort) portGreen += 1; else stbdGreen += 1;
+    }
+
+    // The hull, bow up, at the middle. Same shape as the chart's.
+    ctx.fillStyle = '#7fd4ff';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 20); ctx.lineTo(cx + 13, cy + 17);
+    ctx.lineTo(cx, cy + 10); ctx.lineTo(cx - 13, cy + 17);
+    ctx.closePath(); ctx.fill();
+
+    const blip = (red, green) => (
+      !red && !green ? 'nothing'
+        : [red ? `${red} red` : null, green ? `${green} green` : null].filter(Boolean).join(', '));
+    $('radar-port').textContent = blip(portRed, portGreen);
+    $('radar-stbd').textContent = blip(stbdRed, stbdGreen);
+
+    const att = attitude();
+    const bits = [];
+    if (!videoOn) bits.push('Video is off, so there is no line to sample — turn it on above.');
+    else if (!live.length) bits.push('Waiting for a frame.');
+    else bits.push(
+      `${bins.size} bin${bins.size === 1 ? '' : 's'} lit along the line, `
+      + `${$('line-input').value} % down the frame, ${fov.toFixed(0)}° per camera.`);
+    if (att.roll === null) {
+      bits.push('No attitude on the wire, so the line is NOT stabilised — it is a '
+        + 'fixed row, and a roll of a few degrees walks it off the horizon.');
+    } else if (stabilise) {
+      bits.push(`Stabilised on ${att.from} (roll ${att.roll.toFixed(1)}°, `
+        + `pitch ${att.pitch.toFixed(1)}°); roll moves the two cameras' lines opposite ways.`);
+    } else {
+      bits.push('Stabilisation off: the line is a fixed row in the frame.');
+    }
+    bits.push('Bearing only — one row carries no range. Column-to-bearing is an '
+      + 'equidistant-fisheye approximation, so read a blip to a few degrees, not better.');
+    $('radar-note').textContent = bits.join(' ');
+  }
+
+  // -------------------------------------------------------------------- chart
+
+  const M_PER_DEG_LAT = 110574.0;
+  function mPerDegLon(lat) { return 111320.0 * Math.cos(lat * Math.PI / 180); }
+
+  function toGrid(lat, lon) {
+    const origin = dig(snap, 'origin');
+    if (!origin || num(origin.lat) === null) return null;
+    return [
+      (lon - origin.lon) * mPerDegLon(origin.lat),
+      (lat - origin.lat) * M_PER_DEG_LAT,
+    ];
+  }
+
+  function paintChart() {
+    const canvas = $('chart');
+    const ctx = canvas.getContext('2d');
+    const size = canvas.width;
+    ctx.clearRect(0, 0, size, size);
+
+    const pts = [];
+    const boat = dig(snap, 'boat.position');
+    if (Array.isArray(boat)) pts.push(boat);
+    const wps = [];
+    for (const slot of SLOTS) {
+      const point = points[slot.id];
+      if (!point) continue;
+      const xy = toGrid(point.lat, point.lon);
+      if (xy) { wps.push({ id: slot.id, xy, role: slot.role }); pts.push(xy); }
+    }
+    const marks = markTracks().filter((t) => Array.isArray(t.position));
+    for (const mark of marks) pts.push(mark.position);
+    const parking = tel('autopilot.parking');
+    if (parking && parking.seen && Array.isArray(parking.corners)) {
+      for (const corner of parking.corners) if (Array.isArray(corner)) pts.push(corner);
+    }
+
+    if (!pts.length) {
+      ctx.fillStyle = '#3b4a63';
+      ctx.font = '20px sans-serif';
+      ctx.fillText('no position, no origin — nothing to draw yet', 30, size / 2);
+      return;
+    }
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [x, y] of pts) {
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    }
+    const pad = 8;
+    const span = Math.max(20, maxX - minX, maxY - minY) + pad * 2;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    const scale = size / span;
+    const X = (x) => size / 2 + (x - cx) * scale;
+    const Y = (y) => size / 2 - (y - cy) * scale;
+
+    // A plain metre grid. No tiles: they come off the public internet and this page
+    // has to work on a pontoon behind a phone hotspot.
+    ctx.strokeStyle = '#101a2b'; ctx.lineWidth = 1;
+    const step = span > 60 ? 10 : 5;
+    for (let g = Math.ceil((cx - span / 2) / step) * step; g < cx + span / 2; g += step) {
+      ctx.beginPath(); ctx.moveTo(X(g), 0); ctx.lineTo(X(g), size); ctx.stroke();
+    }
+    for (let g = Math.ceil((cy - span / 2) / step) * step; g < cy + span / 2; g += step) {
+      ctx.beginPath(); ctx.moveTo(0, Y(g)); ctx.lineTo(size, Y(g)); ctx.stroke();
+    }
+
+    // The course, in order, with the leg the boat is on picked out.
+    if (wps.length > 1) {
+      ctx.strokeStyle = '#33456099'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      wps.forEach((w, i) => (i ? ctx.lineTo(X(w.xy[0]), Y(w.xy[1])) : ctx.moveTo(X(w.xy[0]), Y(w.xy[1]))));
+      ctx.stroke();
+    }
+    const targetIndex = num(tel('autopilot.plan.index'));
+    for (const w of wps) {
+      const isTarget = targetIndex !== null && SLOTS.findIndex((s) => s.id === w.id) === targetIndex;
+      const parkRole = w.role.startsWith('park');
+      ctx.fillStyle = isTarget ? '#7fd4ff' : parkRole ? '#eb64eb' : '#c9d6ea';
+      ctx.beginPath(); ctx.arc(X(w.xy[0]), Y(w.xy[1]), isTarget ? 9 : 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#8ea3c2'; ctx.font = '18px sans-serif';
+      ctx.fillText(String(w.id), X(w.xy[0]) + 12, Y(w.xy[1]) - 8);
+    }
+
+    for (const mark of marks) {
+      ctx.fillStyle = mark.type === 1 ? '#e2453f' : '#4fd07a';
+      ctx.beginPath();
+      ctx.arc(X(mark.position[0]), Y(mark.position[1]), 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (parking && parking.seen && Array.isArray(parking.corners) && parking.corners.length === 4) {
+      ctx.strokeStyle = '#eb64eb'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      parking.corners.forEach((c, i) => (i ? ctx.lineTo(X(c[0]), Y(c[1])) : ctx.moveTo(X(c[0]), Y(c[1]))));
+      ctx.closePath(); ctx.stroke();
+      if (Array.isArray(parking.target)) {
+        ctx.fillStyle = '#eb64eb';
+        ctx.beginPath(); ctx.arc(X(parking.target[0]), Y(parking.target[1]), 5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    if (trail.length > 1) {
+      ctx.strokeStyle = '#1f6f8f'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      trail.forEach((p, i) => (i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))));
+      ctx.stroke();
+    }
+
+    if (Array.isArray(boat)) {
+      const heading = num(dig(snap, 'boat.heading_deg'));
+      const bx = X(boat[0]), by = Y(boat[1]);
+      ctx.save();
+      ctx.translate(bx, by);
+      if (heading !== null) ctx.rotate(heading * Math.PI / 180);
+      ctx.fillStyle = '#7fd4ff';
+      ctx.beginPath();
+      ctx.moveTo(0, -14); ctx.lineTo(9, 12); ctx.lineTo(0, 7); ctx.lineTo(-9, 12);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // --------------------------------------------------------------- the berth
+
+  function paintBerth() {
+    const parking = tel('autopilot.parking');
+    const rows = [];
+    if (!parking) {
+      rows.push(['berth', 'nothing reported — not a parking waypoint, or no autonomy']);
+    } else {
+      rows.push(['space in view', parking.seen ? 'yes' : 'no']);
+      if (parking.source) rows.push(['from', parking.source]);
+      if (num(parking.mouth_m) !== null) {
+        const nominal = num(parking.mouth_nominal_m);
+        rows.push(['mouth', `${parking.mouth_m.toFixed(2)} m`
+          + (nominal !== null ? ` (nominal ${nominal.toFixed(2)})` : '')]);
+      }
+      if (num(parking.depth_m) !== null) rows.push(['depth', `${parking.depth_m.toFixed(2)} m`]);
+      if (parking.occupancy) rows.push(['occupancy', parking.occupancy]);
+      if (parking.berth) rows.push(['berth', parking.berth]);
+      if (num(parking.dot_error_m) !== null) rows.push(['off the dot', `${parking.dot_error_m.toFixed(2)} m`]);
+    }
+    $('berth-kv').innerHTML = rows.map(
+      ([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v">${escapeHtml(v)}</td></tr>`).join('');
+
+    const tags = dig(tel('artags'), 'tags');
+    if (!Array.isArray(tags) || !tags.length) {
+      $('tags-table').innerHTML = '<tr><td class="muted">no tags in view</td></tr>';
+    } else {
+      $('tags-table').innerHTML =
+        '<tr><th>id</th><th>cam</th><th>range</th><th>bearing</th></tr>'
+        + tags.slice(0, 10).map((tag) => `<tr>
+            <td><span class="tagchip">${escapeHtml(tag.id)}</span></td>
+            <td>${escapeHtml(tag.cam)}</td>
+            <td>${num(tag.range_m) === null ? '—' : tag.range_m.toFixed(2) + ' m'}</td>
+            <td>${num(tag.bearing_deg) === null ? '—' : tag.bearing_deg.toFixed(1) + '°'}</td>
+          </tr>`).join('');
+    }
+
+    const block = tel('artags');
+    $('berth-note').textContent = !block ? 'The vessel is not reporting tags at all.'
+      : !block.searching
+        ? 'The Jetson is not looking for tags — sender.py needs --artags, and both dockings depend on it.'
+        : 'Tag ids: bow-in berth 1 is 0/1 with 7 at the closed end, berth 2 is 1/3 with 2; '
+          + 'alongside is 4/6 with 5. A missing closed-end tag means that berth is occupied — or its paper fell off.';
+  }
+
+  // ------------------------------------------------------------------ header
+
+  function paintHeader() {
+    const status = dig(snap, 'status') || '—';
+    const pill = $('pill-status');
+    pill.textContent = status;
+    pill.className = 'pill ' + (
+      status === 'AUTONOMOUS' ? 'ok'
+      : status === 'KILLED' || status === 'OUT_OF_CONTROL' ? 'bad'
+      : status === 'REMOTE' ? 'warn' : '');
+
+    $('pill-mode').textContent = `mode ${dig(snap, 'mode') || '—'}`
+      + (dig(snap, 'armed') ? ' · armed' : ' · disarmed');
+
+    const fix = tel('gps.fix') || '—';
+    const fixPill = $('pill-fix');
+    fixPill.textContent = `fix ${fix}`;
+    fixPill.className = 'pill ' + (
+      /RTK_FIX|FIXED/.test(fix) ? 'ok' : /RTK_FLOAT|3D|DGPS/.test(fix) ? 'warn' : 'bad');
+
+    const n = markTracks().length;
+    const markPill = $('pill-marks');
+    markPill.textContent = `${n} mark${n === 1 ? '' : 's'}`;
+    markPill.className = 'pill ' + (n ? 'ok' : 'warn');
+
+    const age = lastFrameAt ? (Date.now() - lastFrameAt) / 1000 : null;
+    const linkPill = $('pill-link');
+    linkPill.textContent = age === null ? 'no data' : `${age.toFixed(1)} s`;
+    linkPill.className = 'pill ' + (age === null || age > 5 ? 'bad' : age > 2 ? 'warn' : 'ok');
+  }
+
+  function paintSources() {
+    // What the *vessel* says, not what was last clicked here: a mode that was
+    // refused, or that never reached the boat, has to look different from one that
+    // took - that is the whole lesson of `run_profile` acking "not implemented"
+    // for a week.
+    const live = tel('autopilot.commander.mark_sources');
+    const text = Array.isArray(live) ? live.join(', ') : (live === undefined ? null : String(live));
+    const pill = $('pill-source');
+    if (text === null) {
+      pill.textContent = 'source unreported';
+      pill.className = 'pill warn';
+      $('source-note').textContent =
+        'The vessel is not reporting which mark sources are live. On a build older '
+        + 'than 2026-08-12 the command does not exist and a buoys leg is blind.';
+    } else if (!text) {
+      pill.textContent = 'marks off';
+      pill.className = 'pill bad';
+      $('source-note').textContent =
+        'No camera-created marks. A buoys waypoint is blind GNSS transit right now.';
+    } else {
+      pill.textContent = text;
+      pill.className = 'pill ok';
+      $('source-note').textContent =
+        `The vessel is creating marks from: ${text}. A mark still needs its confirm `
+        + 'hits before anything steers for it.';
+    }
+    for (const button of document.querySelectorAll('.modes button')) {
+      button.classList.toggle('on', text !== null && button.dataset.sources === text);
+    }
+    sources = text;
+  }
+
+  function paintSide() {
+    $('side-port').classList.toggle('on', passSide === 'port');
+    $('side-stbd').classList.toggle('on', passSide === 'starboard');
+  }
+
+  // ------------------------------------------------------------------ cameras
+
+  function paintCameras(state) {
+    const stream = (state && state.stream) || {};
+    videoOn = !!stream.enabled;
+    $('btn-video').textContent = videoOn ? 'Turn video off' : 'Turn video on';
+    const bits = [videoOn ? 'on' : 'off'];
+    if (stream.max_width) bits.push(`${stream.max_width} px`);
+    if (stream.fps) bits.push(`${stream.fps} fps`);
+    const caps = state && state.caps;
+    if (caps && !String(caps).includes('colour')) {
+      // "no colour mode on this board" must not look like "the colour mode saw
+      // nothing" - with both lidars down that is the difference between a buoy leg
+      // being steered and one running blind.
+      bits.push('this Jetson build has no colour finder — git pull and restart sender.py');
+    }
+    $('cam-status').textContent = bits.join(' · ');
+    for (const cam of ['0', '1']) {
+      const info = (state && state.cameras && state.cameras[cam]) || null;
+      const age = info && num(info.age_s);
+      $(`cam${cam}-age`).textContent =
+        age === null || age === undefined ? 'no frame' : `${age.toFixed(1)} s ago`;
+    }
+    if (videoOn) {
+      for (const cam of ['0', '1']) {
+        const img = $(`cam${cam}`);
+        // The mask is computed from the <img> once it has actually decoded, not on
+        // the poll that set src - reading a half-loaded image gives a blank frame
+        // and a blank frame reads as "no buoys in view", which is the one wrong
+        // answer this panel must never give quietly.
+        img.onload = () => { paintMask(); };
+        img.src = `/api/camera/${cam}.jpg?t=${Date.now()}`;
+      }
+    } else {
+      paintMask();
+    }
+  }
+
+  async function configureCameras(enabled) {
+    await fetch('/api/camera/config', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled,
+        max_width: parseInt($('cam-width').value, 10),
+        fps: parseInt($('cam-fps').value, 10),
+        cameras: ['0', '1'],
+      }),
+    });
+  }
+
+  // --------------------------------------------------------------------- poll
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/snapshot', { credentials: 'same-origin' });
+      if (res.ok) {
+        snap = await res.json();
+        lastFrameAt = Date.now();
+        const boat = dig(snap, 'boat.position');
+        if (Array.isArray(boat)) {
+          const last = trail[trail.length - 1];
+          if (!last || Math.hypot(boat[0] - last[0], boat[1] - last[1]) > 0.25) {
+            trail.push([boat[0], boat[1]]);
+            if (trail.length > 600) trail.shift();
+          }
+        }
+      }
+    } catch (err) { /* the link pill going red is the report */ }
+
+    try {
+      const res = await fetch('/api/camera/state', { credentials: 'same-origin' });
+      if (res.ok) paintCameras(await res.json());
+    } catch (err) { /* as above */ }
+
+    paintHeader();
+    paintSources();
+    paintFigures();
+    paintChart();
+    paintBerth();
+    paintCourse();
+  }
+
+  async function loadSession() {
+    try {
+      const res = await fetch('/api/session', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      session = await res.json();
+      admin = !!session.admin;
+      $('pill-admin').textContent = admin ? 'admin' : 'read only';
+      $('pill-admin').className = 'pill ' + (admin ? 'ok' : '');
+      for (const el of document.querySelectorAll('.admin-only')) el.disabled = !admin;
+      if (!(session.commands || {}).set_mark_source) {
+        toast('this server build has no set_mark_source — the mode buttons will 400', 'bad');
+      }
+      const limits = (session.waypoint_limits || {}).speed;
+      if (limits) {
+        $('speed-input').min = limits.min;
+        $('speed-input').max = limits.max;
+      }
+    } catch (err) { /* the page still reads; every control stays disabled */ }
+  }
+
+  // ------------------------------------------------------------------- wiring
+
+  $('btn-load').addEventListener('click', loadHandout);
+  $('btn-clear').addEventListener('click', () => {
+    for (const slot of SLOTS) { $(`lat-${slot.id}`).value = ''; $(`lon-${slot.id}`).value = ''; }
+    readSlots(); paintCourse();
+  });
+
+  $('btn-send-plan').addEventListener('click', async () => {
+    const plan = buildPlan();
+    if (!plan) { toast(`all ${SLOTS.length} waypoints are needed`, 'bad'); return; }
+    await run('Course', 'set_plan', { plan });
+  });
+  $('btn-arm').addEventListener('click', () => run('Arm', 'arm', {}));
+  $('btn-start').addEventListener('click', () => {
+    if (!confirm('Engage autonomy — the clock starts and the boat drives itself. Go?')) return;
+    run('Engage autonomy', 'autopilot_start', { label: 'surprise-task' });
+  });
+  $('btn-stop').addEventListener('click', () => run('Disengage', 'autopilot_stop', {}));
+  $('btn-estop').addEventListener('click', () => {
+    if (!confirm('EMERGENCY STOP — cut propulsion now?')) return;
+    run('E-stop', 'estop', {});
+  });
+  $('btn-pause').addEventListener('click', () => run('Pause', 'autopilot_pause', {}));
+  $('btn-resume').addEventListener('click', () => run('Resume', 'autopilot_resume', {}));
+  $('btn-back').addEventListener('click', () => run('Back one', 'autopilot_back', {}));
+  $('btn-skip').addEventListener('click', () => run('Skip one', 'autopilot_skip', {}));
+  $('btn-speed').addEventListener('click', () => {
+    const value = parseFloat($('speed-input').value);
+    if (!Number.isFinite(value)) { toast('speed is not a number', 'bad'); return; }
+    run('Speed limit', 'set_speed_limit', { value });
+  });
+
+  for (const button of document.querySelectorAll('.modes button')) {
+    button.addEventListener('click', () => {
+      const wanted = button.dataset.sources;
+      if (!wanted && !confirm('Turn camera marks OFF? A buoys leg becomes blind GNSS transit.')) return;
+      run('Mark source', 'set_mark_source', { sources: wanted });
+    });
+  }
+  for (const button of [$('side-port'), $('side-stbd')]) {
+    button.addEventListener('click', () => { passSide = button.dataset.side; paintSide(); paintMask(); });
+  }
+
+  $('btn-mask').addEventListener('click', () => {
+    maskOn = !maskOn;
+    $('btn-mask').textContent = maskOn ? 'Mask on' : 'Mask off';
+    paintMask();
+  });
+  $('line-input').addEventListener('input', () => {
+    $('line-readout').textContent = `${$('line-input').value} % down the frame`;
+    paintMask();
+  });
+
+  $('btn-stab').addEventListener('click', () => {
+    stabilise = !stabilise;
+    $('btn-stab').classList.toggle('on', stabilise);
+    $('btn-stab').textContent = stabilise ? 'Stabilised' : 'Not stabilised';
+    paintRadar();
+  });
+  for (const id of ['fov-input', 'band-input']) {
+    $(id).addEventListener('input', paintRadar);
+  }
+
+  $('btn-video').addEventListener('click', async () => {
+    if (!admin) return;
+    try { await configureCameras(!videoOn); }
+    catch (err) { toast(`camera: ${err.message}`, 'bad'); }
+  });
+  for (const id of ['cam-width', 'cam-fps']) {
+    $(id).addEventListener('change', async () => {
+      if (!admin || !videoOn) return;
+      try { await configureCameras(true); }
+      catch (err) { toast(`camera: ${err.message}`, 'bad'); }
+    });
+  }
+
+  (async () => {
+    await loadSession();
+    buildSlots();
+    loadHandout();
+    paintSide();
+    $('btn-stab').classList.toggle('on', stabilise);
+    paintRadar();
+    await poll();
+    setInterval(poll, POLL_MS);
+  })();
+})();
+</script>

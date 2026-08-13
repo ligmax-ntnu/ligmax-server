@@ -154,7 +154,22 @@ export class AutopilotPanel {
     this._blocked = el('p', 'ap-blocked');
     this._blocked.hidden = true;
 
-    root.append(headline, this._reason, this._blocked);
+    // -- the collision-avoidance annunciator -------------------------------
+    //
+    // NJORD §9.2 does not merely ask the boat to avoid the Otter: "Once
+    // observing the Otter vessel, your ASV shall **signal the detection**, and
+    // safely maneuver around the marker vessel." §11.4 says where the jury looks
+    // for that — a GUI showing "which objects are detected and based on this how
+    // the path is further planned", understood "without additional explanation".
+    //
+    // So this is not decoration and it is not a duplicate of the reason line. It
+    // is the signal, and it goes up the moment `detected` is true, which the
+    // vessel sets BEFORE it starts manoeuvring because that is the order the
+    // rule asks for.
+    this._colreg = el('p', 'ap-colreg');
+    this._colreg.hidden = true;
+
+    root.append(headline, this._colreg, this._reason, this._blocked);
 
     // -- the speed in force ------------------------------------------------
     //
@@ -296,6 +311,7 @@ export class AutopilotPanel {
           'autopilot block — the self_driving node is probably not running.'
         : 'Nothing on this vessel is reporting an autopilot state.';
       this._blocked.hidden = true;
+      this._colreg.hidden = true;
       this._stuck.hidden = true;
       this._progressText.textContent = 'No course loaded.';
       this._progressFill.style.width = '0%';
@@ -324,6 +340,7 @@ export class AutopilotPanel {
       this._blocked.hidden = true;
     }
 
+    this._updateColreg(block);
     this._updateProgress(block);
     this._updateSpeed(block);
     this._updateSees(block);
@@ -457,10 +474,73 @@ export class AutopilotPanel {
     }
   }
 
+  /**
+   * The detection signal NJORD §9.2 requires, and what the boat is doing about it.
+   *
+   * Deliberately one line and deliberately loud. A jury member reading this over
+   * somebody's shoulder has to get three things without asking: that the boat has
+   * SEEN a vessel, which way it is coming, and what the boat has decided. Anything
+   * longer and they will read the reason line underneath instead, which is written
+   * for the operator.
+   *
+   * `detected` false is not the same as absent — a run where the field never
+   * appears at all means the leg is not an `avoid` leg, whereas false means the
+   * boat is on that leg and watching. Neither shows the banner.
+   */
+  _updateColreg(block) {
+    if (!block.detected) {
+      this._colreg.hidden = true;
+      return;
+    }
+    const SITUATION = {
+      'head-on': 'HEAD-ON',
+      crossing: 'CROSSING FROM STARBOARD',
+      'port-crossing': 'OFF THE PORT BOW',
+      overtaking: 'OVERTAKING',
+      'stand-on': 'CROSSING FROM PORT',
+      obstacle: 'IN THE WAY',
+    };
+    const ACTION = {
+      wait: 'holding — letting it pass ahead',
+      offset: 'altering to starboard',
+      'passing astern': 'passing astern',
+      'standing on': 'standing on — holding course and speed',
+      'backing off': 'BACKING OFF',
+      none: 'watching',
+    };
+    const parts = [`VESSEL DETECTED — ${SITUATION[block.colreg] ?? String(block.colreg ?? '').toUpperCase()}`];
+    if (Number.isFinite(block.range_m)) parts.push(`${block.range_m.toFixed(0)} m off`);
+    if (Number.isFinite(block.cpa_m) && Number.isFinite(block.tcpa_s)) {
+      parts.push(`CPA ${block.cpa_m.toFixed(0)} m in ${block.tcpa_s.toFixed(0)} s`);
+    }
+    const action = ACTION[block.action] ?? block.action;
+    if (action) parts.push(action);
+    this._colreg.textContent = parts.join(' · ');
+    this._colreg.hidden = false;
+  }
+
   _updateDetail(block) {
     const rows = [];
     if (block.behaviour) rows.push(['Behaviour', block.behaviour]);
     if (block.phase) rows.push(['Phase', String(block.phase)]);
+
+    // The COLREG numbers in full, for the operator rather than the jury. The
+    // banner above says what is happening; this is where you read whether the
+    // boat's idea of the geometry is right — a bearing that says "starboard"
+    // while the Otter is visibly ahead means the camera yaws in rig.json are out,
+    // and that is the failure most likely to survive a casual glance.
+    if (block.detected) {
+      const bits = [String(block.colreg ?? '?')];
+      if (Number.isFinite(block.vessel_bearing_deg)) {
+        const b = block.vessel_bearing_deg;
+        bits.push(`bearing ${b > 0 ? '+' : ''}${b.toFixed(0)}° (${b > 0 ? 'stbd' : 'port'})`);
+      }
+      if (Number.isFinite(block.vessel_speed)) bits.push(`${block.vessel_speed.toFixed(1)} m/s`);
+      if (Number.isFinite(block.action_held_s) && block.action_held_s > 0) {
+        bits.push(`${block.action_held_s.toFixed(0)} s into the manoeuvre`);
+      }
+      rows.push(['Vessel', bits.join(' · ')]);
+    }
 
     // The parking space, for the operator tuning the depth offset. The chart draws
     // the same numbers as a picture; this is where you read them off. `x.xx m in`

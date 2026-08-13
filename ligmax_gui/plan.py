@@ -100,9 +100,66 @@ ROLES: dict[str, dict[str, Any]] = {
     "avoid": {
         "label": "Collision avoidance",
         "help": (
-            "Drive to it watching for a vessel and giving way under COLREG - "
-            "head-on and starboard-crossing turn to starboard, port-crossing "
-            "stands on. Task 2, where the Otter is trying to get in the way."
+            "Drive to it watching for a vessel and giving way under COLREG. "
+            "A vessel crossing from STARBOARD: hold station on the leg and let "
+            "it pass ahead. A vessel HEAD-ON: alter 8 m to starboard, run "
+            "parallel to the leg, rejoin once it is astern. Task 2, where the "
+            "Otter drives one straight line at 2.5 kn and will not give way. "
+            "Lay this role on BOTH ends of the leg."
+        ),
+        "settles": False,
+        "default_hold_s": 0.0,
+    },
+    # ---- NJORD §9.2, declared rather than classified.
+    #
+    # Which side the Otter comes from is in the briefing and there are only two
+    # cases, so the operator picks the manoeuvre here, on the dock, instead of
+    # the boat inferring it from a monocular bearing thirty seconds before it
+    # matters.  `avoid` above still classifies and is the right thing for unknown
+    # traffic; these four are what a scored Njord run should be laid with.
+    #
+    # Lay the role on the SECOND waypoint of the pair - the one being driven to.
+    # The leg is the line from the waypoint before it, and that line is what the
+    # offset runs parallel to and what the backups measure their midpoint along.
+    "collision_front": {
+        "label": "Collision — from ahead",
+        "help": (
+            "Watch -45..+45 deg for a vessel; on seeing one, alter 8 m to "
+            "starboard, run parallel to the line, and rejoin once it is astern. "
+            "Task 2, the head-on run. Lay it on the SECOND of the two points."
+        ),
+        "settles": False,
+        "default_hold_s": 0.0,
+    },
+    "collision_right": {
+        "label": "Collision — from starboard",
+        "help": (
+            "Watch +45..+110 deg for a vessel; on seeing one, hold station on "
+            "the line at a crawl and let it cross ahead, then carry on. Task 2, "
+            "the crossing run. Lay it on the SECOND of the two points."
+        ),
+        "settles": False,
+        "default_hold_s": 0.0,
+    },
+    "collision_front_backup": {
+        "label": "Collision — ahead, BLIND backup",
+        "help": (
+            "The same alteration, larger (12 m), with NO detection at all. "
+            "Starts 10 m before the midpoint of the two points and rejoins 10 m "
+            "after it. Nothing can stop it and nothing needs to be working. Use "
+            "it when the detector cannot be trusted — it will manoeuvre whether "
+            "or not the Otter is there."
+        ),
+        "settles": False,
+        "default_hold_s": 0.0,
+    },
+    "collision_right_backup": {
+        "label": "Collision — starboard, BLIND backup",
+        "help": (
+            "The same hold, longer (20 s), with NO detection at all. Starts 10 m "
+            "before the midpoint of the two points. Nothing can stop it and "
+            "nothing needs to be working. It will stop whether or not the Otter "
+            "is there."
         ),
         "settles": False,
         "default_hold_s": 0.0,
@@ -188,6 +245,20 @@ ROLES: dict[str, dict[str, Any]] = {
 #: Roles that find their berth from the AR tags.  Mirrors ``plan.TAG_ROLES`` on the
 #: vessel.
 TAG_ROLES = frozenset({"park_tag", "park_tag_parallel"})
+
+#: Every role the vessel's ``behaviours/parking.Parking`` runs.  Mirrors
+#: ``plan.PARKING_ROLES``.  What they have in common is a berth they enter and an
+#: exit they can be told to skip, which is the only thing ``park_no_exit`` means.
+PARKING_ROLES = frozenset({"park", "park_parallel", "park_tag", "park_tag_parallel"})
+
+#: How the lateral rule reads the direction of buoyage, and how a cardinal is
+#: passed.  Both are the *plan's*, not a waypoint's, and both mirror
+#: ``ligmax-pi/nodes/self_driving/plan.py`` — see ``BUOYAGE_ROUTE`` and
+#: ``CARDINAL_INSIDE`` there for what they are for.  Listed rather than passed
+#: through blind so that a typo is refused on the dock instead of quietly flying a
+#: ring under the channel rule.
+BUOYAGE_MODES = ("venue", "route")
+CARDINAL_RULES = ("safe_side", "inside")
 
 #: Which berths each tag role may be pointed at by name.  Mirrors the keys of
 #: ``perception/artags.BOW_IN_BERTHS`` and ``PARALLEL_BERTHS`` on the vessel; the
@@ -357,11 +428,87 @@ def _waypoint(item: Any, position: int) -> tuple[dict[str, Any] | None, str | No
             )
         out["berth"] = berth
 
+    # Stay in the berth when the hold is over instead of reversing out of it.
+    #
+    # This was MISSING until 2026-08-13, and missing here means dropped: ``out`` is
+    # built field by field, so a ``park_no_exit`` the operator sent was validated
+    # nowhere, refused nowhere, and simply never reached the vessel — which reversed
+    # out of the final berth of the surprise task while the page that sent the flag
+    # showed it set.  Exactly the ``run_profile`` failure this file's own docstring
+    # warns about, in the field that ends the run.  See docs/findings.md item 41.
+    if item.get("park_no_exit") is not None:
+        if not isinstance(item["park_no_exit"], bool):
+            return None, f"waypoint {position}: park_no_exit is true or false"
+        if item["park_no_exit"]:
+            if role not in PARKING_ROLES:
+                return None, (
+                    f"waypoint {position}: 'park_no_exit' is only for the parking "
+                    f"roles ({', '.join(sorted(PARKING_ROLES))}), and this one is "
+                    f"'{role}'"
+                )
+            out["park_no_exit"] = True
+
     notes = str(item.get("notes") or "")[:MAX_NOTES].strip()
     if notes:
         out["notes"] = notes
 
     return out, None
+
+
+#: Roles that need a leg in front of them, and how much of one.
+#:
+#: A collision role manoeuvres relative to the LINE between its waypoint and the
+#: one before it: the offset runs parallel to that line, and the blind backups
+#: measure their start from its midpoint.  So the first waypoint of a plan can
+#: never carry one — there is no line yet — and a leg shorter than the manoeuvre
+#: means the boat is still off the centreline when it arrives, which on Task 2 is
+#: a 5 m gate it does not fit through.
+#:
+#: 30 m is the blind backup's own footprint (10 m before the midpoint, 10 m
+#: after) plus room at each end to get out and back.  Refusing here rather than
+#: on the vessel is the whole point of this file existing: the operator finds out
+#: while laying the course, not from a boat already in the water.
+COLLISION_ROLES = frozenset({
+    "collision_front", "collision_right",
+    "collision_front_backup", "collision_right_backup",
+})
+COLLISION_MIN_LEG_M = 30.0
+
+
+def _leg_metres(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """Great-circle-ish distance between two waypoints, metres.
+
+    Equirectangular, which is exact enough for a course whose longest leg is
+    under 100 m and avoids importing anything.
+    """
+    lat = math.radians(0.5 * (a["lat"] + b["lat"]))
+    dx = math.radians(b["lon"] - a["lon"]) * math.cos(lat) * 6371000.0
+    dy = math.radians(b["lat"] - a["lat"]) * 6371000.0
+    return math.hypot(dx, dy)
+
+
+def _check_collision_legs(waypoints: list[dict[str, Any]]) -> str | None:
+    """Refuse a collision role that has no leg, or too short a one."""
+    for position, waypoint in enumerate(waypoints, start=1):
+        role = waypoint.get("role")
+        if role not in COLLISION_ROLES:
+            continue
+        if position == 1:
+            return (
+                f"waypoint 1: '{role}' manoeuvres relative to the line from the "
+                "waypoint before it, and there is nothing before waypoint 1. Lay "
+                "the pair as two points and put the role on the SECOND one"
+            )
+        length = _leg_metres(waypoints[position - 2], waypoint)
+        if length < COLLISION_MIN_LEG_M:
+            return (
+                f"waypoint {position}: '{role}' needs at least "
+                f"{COLLISION_MIN_LEG_M:.0f} m of leg to manoeuvre in and this one "
+                f"is {length:.0f} m. The blind backup alone runs from 10 m before "
+                "the midpoint to 10 m after it, and the boat has to be back on "
+                "the centreline before the next gate"
+            )
+    return None
 
 
 def validate(payload: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -391,6 +538,10 @@ def validate(payload: Any) -> tuple[dict[str, Any] | None, str | None]:
             return None, why
         waypoints.append(waypoint)  # type: ignore[arg-type]
 
+    why = _check_collision_legs(waypoints)
+    if why is not None:
+        return None, why
+
     cleaned: dict[str, Any] = {
         "name": (str(payload.get("name") or "plan")[:MAX_NAME].strip() or "plan"),
         "waypoints": waypoints,
@@ -403,6 +554,19 @@ def validate(payload: Any) -> tuple[dict[str, Any] | None, str | None]:
     # it is already through.
     bearing = _finite(payload.get("channel_bearing"))
     cleaned["channel_bearing"] = 0.0 if bearing is None else bearing % 360.0
+
+    # …and the two fields that say the paragraph above does not apply, because the
+    # course is a ring rather than a channel.  Both default to the channel, so a plan
+    # that says nothing is byte-for-byte the plan it was before these existed.
+    for field, allowed in (("buoyage", BUOYAGE_MODES),
+                           ("cardinal_rule", CARDINAL_RULES)):
+        raw_value = payload.get(field)
+        if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+            continue
+        value = str(raw_value).strip().lower()
+        if value not in allowed:
+            return None, f"{field} '{raw_value}' is not one of {', '.join(allowed)}"
+        cleaned[field] = value
 
     # Where to resume, for NJORD §8.2's "re-enter behind the last passed
     # waypoint": the operator drives back by hand and re-uploads with this set
@@ -431,4 +595,14 @@ def summarise(plan: dict[str, Any]) -> str:
         role = str(waypoint.get("role", "transit"))
         counts[role] = counts.get(role, 0) + 1
     shape = ", ".join(f"{n}x {role}" for role, n in sorted(counts.items()))
+    # The two course-level rules go in the audit line when they are not the default.
+    # They decide which side of every mark the boat passes, so an upload that set
+    # them has to be distinguishable afterwards from one that did not.
+    rules = [
+        f"{field}={plan[field]}"
+        for field in ("buoyage", "cardinal_rule")
+        if plan.get(field)
+    ]
+    if rules:
+        shape = f"{shape}; {', '.join(rules)}"
     return f"{plan.get('name', 'plan')!r}: {len(plan.get('waypoints') or [])} wp ({shape})"

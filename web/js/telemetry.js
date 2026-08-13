@@ -133,6 +133,12 @@ const FIELDS = {
   // testing.md §8's "confirm the switch is standard" line.
   'lights.override': { label: 'Custom pattern on', kind: 'bool', goodWhen: false },
   'lights.pattern_frames': { label: 'Pattern frames', digits: 0 },
+  // The headlight covers, set from /led_control (2026-08-13). Commanded, never
+  // measured — these servos have no feedback, so a jammed cover reports the angle
+  // it was asked for. The two sides are mirrored: left is 20° closed / 110° open,
+  // right is 160° closed / 70° open, so equal numbers are not equal positions.
+  'lights.servo_left_deg': { label: 'Cover angle L', unit: '°', digits: 0 },
+  'lights.servo_right_deg': { label: 'Cover angle R', unit: '°', digits: 0 },
 
   // The hand-flown route: the cap a `goto` and an AUTO mission run at, and where
   // the last go-to was sent. Not the autonomy node's ceiling — that is

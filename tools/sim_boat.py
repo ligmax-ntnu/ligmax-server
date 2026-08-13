@@ -164,6 +164,16 @@ LIGHT_COLOURS = {
     "STANDBY": "white",
 }
 
+# Where the headlight covers start: closed, which is where the ESP32 puts them on
+# boot. Only the closed angles are needed here - the *bounds* are the server's
+# (`ligmax_gui/server.py`'s LIGHTS_SERVO_ENDPOINTS, which mirrors the vessel's,
+# which mirrors the sketch's), and this file adding a fifth copy of them would be
+# a fifth thing to keep in step for no gain. `set_lights_servos` is the only one
+# of /led_control's four commands the simulator answers: the other three drive an
+# override engine in lights.py that has no equivalent here, and a fake ack for
+# them would say the hull changed colour when nothing did.
+SERVO_CLOSED = {"left": 20, "right": 160}
+
 # The stabilisation tuning, as the vessel reads it off the flight controller
 # (`ligmax-pi/nodes/io_manager/tuning.py`). Standing in for real parameters, so
 # the tuning panel on /control can be driven with no boat: `set_param` writes here
@@ -235,6 +245,10 @@ class Sim:
         self.tuning = dict(TUNING_DEFAULTS)
         self.tuning_writes = 0
         self.last_param_write = None
+        # The two headlight-cover angles, so /led_control's sliders can be worked
+        # on with no boat. Commanded and echoed straight back, which is also what
+        # the real vessel does - these servos have no feedback at all.
+        self.servos = dict(SERVO_CLOSED)
         # The autonomy node's own state, so the autopilot panel and the
         # role-coloured course layer can be worked on with no boat present. The
         # cursor is separate from `waypoint_index` because the two count
@@ -842,6 +856,9 @@ class Sim:
                 "for_status": self.status,
                 "link": True,
                 "acks": int(now),
+                # Commanded, never measured - see `self.servos`.
+                "servo_left_deg": self.servos["left"],
+                "servo_right_deg": self.servos["right"],
             },
             "gps": {
                 "fix": "RTK_FIXED" if now % 90 > 12 else "3D",
@@ -1046,6 +1063,18 @@ class Sim:
         if name == "get_params":
             # Nothing to re-read from - the dict *is* the flight controller here.
             return "acked", f"re-read {len(self.tuning)} parameters"
+        if name == "set_lights_servos":
+            # The server has already refused anything outside each cover's travel,
+            # so this only has to echo. Worth noting what is NOT modelled: on the
+            # boat the angle is stepped 2° every 15 ms and re-asserted every
+            # second, so a real cover takes about a second to arrive and a real
+            # ESP32 reboot is invisible. Here it teleports.
+            try:
+                for side in ("left", "right"):
+                    self.servos[side] = int(round(float(args[side])))
+            except (KeyError, TypeError, ValueError):
+                return "failed", "set_lights_servos wants a left and a right angle"
+            return "acked", f"left {self.servos['left']} deg, right {self.servos['right']} deg"
         if name == "raw":
             # Two debugging hooks, and **no longer reachable from the dashboard**:
             # `raw` was removed from server.py's COMMAND_SPECS on 2026-08-10 (it
