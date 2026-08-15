@@ -133,12 +133,29 @@ const FIELDS = {
   // testing.md §8's "confirm the switch is standard" line.
   'lights.override': { label: 'Custom pattern on', kind: 'bool', goodWhen: false },
   'lights.pattern_frames': { label: 'Pattern frames', digits: 0 },
-  // The headlight covers, set from /led_control (2026-08-13). Commanded, never
-  // measured — these servos have no feedback, so a jammed cover reports the angle
-  // it was asked for. The two sides are mirrored: left is 20° closed / 110° open,
-  // right is 160° closed / 70° open, so equal numbers are not equal positions.
-  'lights.servo_left_deg': { label: 'Cover angle L', unit: '°', digits: 0 },
-  'lights.servo_right_deg': { label: 'Cover angle R', unit: '°', digits: 0 },
+  // The bow board — the forward strips and the two cover servos, split onto their
+  // own ESP32 over USB on 2026-08-13. Its own block, because it is its own link:
+  // the hull can be lit while this is unplugged, and `lights.link` says nothing
+  // about it either way.
+  //
+  // `verified` is the one place in the fleet where a light command is *confirmed*
+  // rather than assumed — this board answers every line, unlike the hull's, so
+  // "the board identified itself and acked the last write" is a true statement
+  // here and can never be one for `lights`.
+  'headlights.link': { label: 'Bow board link', kind: 'bool', goodWhen: true },
+  'headlights.verified': { label: 'Acked', kind: 'bool', goodWhen: true },
+  'headlights.board': { label: 'Identified as', kind: 'text', wide: true },
+  'headlights.port': { label: 'Device', kind: 'text', wide: true },
+  // Commanded, never measured — these servos have no feedback, so a jammed cover
+  // reports the angle it was asked for. The two sides are mirrored: left is 20°
+  // closed / 110° open, right is 160° closed / 70° open, so equal numbers are not
+  // equal positions.
+  'headlights.servo_left_deg': { label: 'Cover angle L', unit: '°', digits: 0 },
+  'headlights.servo_right_deg': { label: 'Cover angle R', unit: '°', digits: 0 },
+  'headlights.front_left': { label: 'Front L colour', kind: 'text' },
+  'headlights.front_right': { label: 'Front R colour', kind: 'text' },
+  'headlights.refused': { label: 'Commands refused', digits: 0, warn: 1, direction: ABOVE },
+  'headlights.last_error': { label: 'Last error', kind: 'text', wide: true },
 
   // The hand-flown route: the cap a `goto` and an AUTO mission run at, and where
   // the last go-to was sent. Not the autonomy node's ceiling — that is
@@ -202,6 +219,7 @@ const GROUPS = [
   { key: 'thrusters', eyebrow: 'Propulsion', title: 'Thrusters' },
   { key: 'trim', eyebrow: 'Stabilisation', title: 'Active trim — slider & amas' },
   { key: 'lights', eyebrow: 'Signalling', title: 'Navigation lights' },
+  { key: 'headlights', eyebrow: 'Signalling', title: 'Headlights & covers — bow board' },
   { key: 'autonomy', eyebrow: 'Autonomy', title: 'Planner' },
   { key: 'system', eyebrow: 'Compute', title: 'System health' },
   { key: 'bilge', eyebrow: 'Safety', title: 'Bilge & hull' },

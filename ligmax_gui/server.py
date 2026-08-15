@@ -85,11 +85,16 @@ MAX_MISSION_WAYPOINTS = 100
 MIN_LIGHTS_FPS = 1.0
 MAX_LIGHTS_FPS = 60.0
 
-# The headlight covers' travel, mirroring lights.py's SERVO_ENDPOINTS, which in
-# turn mirrors lights_esp.ino's SERVO_L_/SERVO_R_ CLOSED and OPEN. Three copies
-# of one hand-calibrated fact, in three repos; the firmware's is the one that
-# clamps, the vessel's is the one that refuses, and this one exists so a slider
-# knows where its ends are and a bad angle is a 400 the operator reads.
+# The headlight covers' travel, mirroring
+# ligmax-pi/nodes/io_manager/headlights.py's SERVO_ENDPOINTS, which in turn
+# mirrors headlights_esp.ino's SERVO_L_/SERVO_R_ CLOSED and OPEN. Three copies of
+# one hand-calibrated fact, in three repos; the firmware's is the one that clamps,
+# the vessel's is the one that refuses, and this one exists so a slider knows
+# where its ends are and a bad angle is a 400 the operator reads.
+#
+# Both the covers and the forward strips moved off the hull lights board onto
+# their own ESP32 on 2026-08-13 (reached over USB, not the GPIO UART). Nothing on
+# this side of the link changed with them except which file to keep in step.
 #
 # The sides are MIRRORED - left opens by increasing the angle, right by
 # decreasing it - so nothing here may reduce the pair to one range.
@@ -306,20 +311,36 @@ COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "args": {"fps": "float"},
         "log_level": "WARN",
     },
-    # The two headlight-cover servos on the lights ESP32, to an angle each, from
-    # /led_control's sliders. Both angles every time: every arg declared here is
-    # required (see the validator), and two sliders that are always sent together
-    # is also the honest shape - the covers are a pair on the boat.
+    # The two headlight-cover servos, to an angle each, from /led_control's
+    # sliders. Both angles every time: every arg declared here is required (see
+    # the validator), and two sliders that are always sent together is also the
+    # honest shape - the covers are a pair on the boat.
     #
-    # The only lights command that moves a mechanism rather than lighting one,
+    # The only lighting command that moves a mechanism rather than lighting one,
     # which is why it is bounded per side below rather than clamped, and why it
     # is logged at WARN: a cover found somewhere nobody left it is a thing to be
     # able to look up afterwards. Not `confirm`, though - it is small, reversible
     # by moving the slider back, and meant to be dragged while watching the bow.
+    #
+    # The name predates the 2026-08-13 split that moved the covers onto their own
+    # board; it is kept because renaming an operator-visible command to record an
+    # internal change would break every saved link for nothing.
     "set_lights_servos": {
         "label": "Headlight cover angles",
         "args": {"left": "float", "right": "float"},
         "log_level": "WARN",
+    },
+    # The two forward strips, one solid colour each, on that same second board.
+    # Working lights rather than signals: nothing in the status machine drives
+    # them, the standard/custom switch does not reach them, and KILLED does not
+    # override them - solid red on the hull is a promise about the thrusters and
+    # says nothing about whether the boat can see where it is going.
+    #
+    # `"RRGGBB"` per side, `"000000"` for off. INFO, not WARN: unlike the covers
+    # this moves nothing, and it is meant to be nudged while watching the water.
+    "set_headlights": {
+        "label": "Headlight colour",
+        "args": {"left": "str", "right": "str"},
     },
     # --- the autonomy node -------------------------------------------------
     #
@@ -1764,6 +1785,19 @@ def create_app(config: Config | None = None, store: Store | None = None) -> Flas
                         }
                     ), 400
                 cleaned[side] = round(angle)
+
+        if name == "set_headlights":
+            # Six hex digits per side, `#` tolerated because that is what an
+            # <input type=color> produces. Normalised to upper case with no `#`,
+            # which is the shape the vessel's `parse_colour()` and the firmware's
+            # `FRONT` command both want.
+            for side in ("left", "right"):
+                text = str(cleaned[side]).strip().lstrip("#").upper()
+                if len(text) != 6 or any(c not in "0123456789ABCDEF" for c in text):
+                    return jsonify(  # type: ignore[return-value]
+                        {"error": f"'{side}' must be a colour as RRGGBB hex"}
+                    ), 400
+                cleaned[side] = text
 
         queued = store.queue_command(name, cleaned, issued_by=_client_ip())
         level = spec.get("log_level") or ("ERROR" if spec.get("danger") else "INFO")

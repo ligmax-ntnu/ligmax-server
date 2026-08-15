@@ -163,14 +163,15 @@
   .fps-input { width: 70px; font-size: 13px; padding: 5px 6px; }
 
   .send-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  #send-status.ok, #servo-status.ok { color: var(--ok); }
-  #send-status.bad, #servo-status.bad { color: var(--bad); }
-  #send-status.muted, #servo-status.muted { color: var(--dim); }
+  #send-status.ok, #servo-status.ok, #front-status.ok { color: var(--ok); }
+  #send-status.bad, #servo-status.bad, #front-status.bad { color: var(--bad); }
+  #send-status.muted, #servo-status.muted, #front-status.muted { color: var(--dim); }
 
-  /* The two cover servos. One row per side, and the end labels are filled from
-     the server's own bounds - the sides are mirrored, so which end is "open"
-     differs between the two rows and must not be hard-coded here. */
-  .servo { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  /* The two cover servos, and above them the two forward strips. One row per
+     side each. The servo rows' end labels are filled from the server's own
+     bounds - the sides are mirrored, so which end is "open" differs between the
+     two rows and must not be hard-coded here. */
+  .servo, .front { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
   .servo-name { width: 46px; font-size: 12.5px; color: var(--dim); }
   .servo-end { font-size: 11px; color: var(--dim); width: 74px; }
   .servo-end.hi { text-align: left; }
@@ -279,7 +280,36 @@
   </section>
 
   <section class="card">
-    <h2>Headlight covers</h2>
+    <h2>Headlights &amp; covers</h2>
+    <div class="front" data-side="left">
+      <span class="servo-name">Left</span>
+      <input type="color" class="front-picker admin-only" value="#ffffff">
+      <button class="btn-front-send admin-only">Light</button>
+      <button class="btn-front-off admin-only">Off</button>
+      <span class="pill front-shown">boat: —</span>
+    </div>
+    <div class="front" data-side="right">
+      <span class="servo-name">Right</span>
+      <input type="color" class="front-picker admin-only" value="#ffffff">
+      <button class="btn-front-send admin-only">Light</button>
+      <button class="btn-front-off admin-only">Off</button>
+      <span class="pill front-shown">boat: —</span>
+    </div>
+    <div class="toolbar">
+      <button id="btn-front-both" class="admin-only">Both to the left colour</button>
+      <span id="front-status" class="muted"></span>
+    </div>
+    <p class="hint">
+      The two forward strips — <b>working lights, not signals</b>. Nothing in the
+      status machine drives them, the standard/custom switch above does not reach
+      them, and KILLED does not override them: solid red on the hull is a promise
+      about the thrusters, and says nothing about whether the boat can see where
+      it is going. They live on the same second ESP32 as the covers below, reached
+      over USB rather than the hull board's UART, so they fail together and
+      independently of the hull colour — watch <code>headlights.link</code> on
+      <code>/control</code>, not <code>lights.link</code>.
+    </p>
+
     <div class="servo" data-side="left">
       <span class="servo-name">Left</span>
       <span class="servo-end lo"></span>
@@ -379,6 +409,7 @@
   let fpsRequestPending = false;
   let pendingCommandId = null;
   let pendingServoId = null;
+  let pendingFrontId = null;
   let effects = [];
 
   // Per-side cover-servo bounds, from /api/session's `lights_servos` (which
@@ -752,6 +783,52 @@
     }
   });
 
+  /* --- the forward strips ------------------------------------------------- */
+  //
+  // Same board as the covers below, and nothing to do with the hull strips at the
+  // top of this page: no status drives these, the standard/custom switch does not
+  // reach them, and KILLED does not override them.
+
+  const frontRow = (side) => document.querySelector(`.front[data-side="${side}"]`);
+  const frontStatus = $('front-status');
+
+  function frontEl(side, klass) { return frontRow(side).querySelector(klass); }
+
+  // Both colours every time - `set_headlights` requires both args, the same way
+  // the cover command requires both angles, so a one-side change re-asserts the
+  // other side's current value rather than leaving it unstated.
+  async function sendFront(colours) {
+    if (!admin) return;
+    const args = {
+      left: hexBody(colours.left ?? frontEl('left', '.front-picker').value),
+      right: hexBody(colours.right ?? frontEl('right', '.front-picker').value),
+    };
+    frontStatus.textContent = 'sending…';
+    frontStatus.className = 'muted';
+    try {
+      const body = await postCommand('set_headlights', args);
+      pendingFrontId = body.command.id;
+      frontStatus.textContent = `sent #${args.left} / #${args.right} — command #${body.command.id}`;
+      frontStatus.className = 'muted';
+    } catch (err) {
+      frontStatus.textContent = 'failed: ' + (err.message || err);
+      frontStatus.className = 'bad';
+    }
+  }
+
+  for (const side of ['left', 'right']) {
+    frontEl(side, '.btn-front-send').addEventListener('click', () => sendFront({}));
+    frontEl(side, '.btn-front-off').addEventListener('click', () => {
+      frontEl(side, '.front-picker').value = '#000000';
+      sendFront({});
+    });
+  }
+  $('btn-front-both').addEventListener('click', () => {
+    const colour = frontEl('left', '.front-picker').value;
+    frontEl('right', '.front-picker').value = colour;
+    sendFront({ left: colour, right: colour });
+  });
+
   /* --- headlight cover servos --------------------------------------------- */
 
   const SERVO_SIDES = ['left', 'right'];
@@ -1077,12 +1154,30 @@
       fpsCurrent.textContent = 'current: unknown';
     }
 
-    // The cover angles the vessel says it last sent the ESP32 - commanded, not
-    // measured, since these servos report nothing back. Absent until somebody
-    // has moved them, in which case the covers are wherever the ESP32 booted
+    // The bow board, which is not the hull board: `telemetry.headlights`, its own
+    // link and its own failure (see the hints in that card).
+    const bow = telemetry.headlights || {};
+
+    for (const side of SERVO_SIDES) {
+      const pill = frontRow(side).querySelector('.front-shown');
+      const colour = bow[`front_${side}`];
+      if (typeof colour !== 'string') {
+        // Null until somebody has set one, which is honest: the board boots dark
+        // and nothing here ever asserted a colour, so there is none to report.
+        pill.textContent = 'boat: not set';
+        pill.className = 'pill front-shown';
+      } else {
+        pill.textContent = `boat: #${colour}`;
+        pill.className = 'pill front-shown ' + (colour === '000000' ? '' : 'accent');
+      }
+    }
+
+    // The cover angles the vessel says it last sent the board - commanded, not
+    // measured, since these servos report nothing back. Null until somebody
+    // has moved them, in which case the covers are wherever the board booted
     // them (closed) and saying so beats printing a number nobody commanded.
     for (const side of SERVO_SIDES) {
-      const deg = lights[`servo_${side}_deg`];
+      const deg = bow[`servo_${side}_deg`];
       const pill = servoRow(side).querySelector('.servo-shown');
       if (typeof deg !== 'number') {
         pill.textContent = 'boat: not set';
@@ -1109,12 +1204,19 @@
       }
     }
 
-    if (pendingServoId) {
-      const cmd = (snapshot.commands || []).find((c) => c.id === pendingServoId);
+    // Three independent pending commands, three independent status lines: the
+    // pattern's, the covers', and the headlights'. One shared line would have the
+    // covers' answer overwriting the pattern's a second after it appeared.
+    for (const pending of [
+      { id: pendingServoId, el: servoStatus, clear: () => { pendingServoId = null; } },
+      { id: pendingFrontId, el: frontStatus, clear: () => { pendingFrontId = null; } },
+    ]) {
+      if (!pending.id) continue;
+      const cmd = (snapshot.commands || []).find((c) => c.id === pending.id);
       if (cmd && cmd.status !== 'queued' && cmd.status !== 'delivered') {
-        servoStatus.textContent = cmd.status + (cmd.result ? ': ' + cmd.result : '');
-        servoStatus.className = cmd.status === 'acked' ? 'ok' : 'bad';
-        pendingServoId = null;
+        pending.el.textContent = cmd.status + (cmd.result ? ': ' + cmd.result : '');
+        pending.el.className = cmd.status === 'acked' ? 'ok' : 'bad';
+        pending.clear();
       }
     }
   }

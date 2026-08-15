@@ -245,10 +245,12 @@ class Sim:
         self.tuning = dict(TUNING_DEFAULTS)
         self.tuning_writes = 0
         self.last_param_write = None
-        # The two headlight-cover angles, so /led_control's sliders can be worked
-        # on with no boat. Commanded and echoed straight back, which is also what
-        # the real vessel does - these servos have no feedback at all.
+        # The bow board's two cover angles and two strip colours, so
+        # /led_control's sliders and colour pickers can be worked on with no boat.
+        # Commanded and echoed straight back, which is also what the real vessel
+        # does - the servos have no feedback at all and the strips report nothing.
         self.servos = dict(SERVO_CLOSED)
+        self.front = {"left": None, "right": None}  # None = never asked, board is dark
         # The autonomy node's own state, so the autopilot panel and the
         # role-coloured course layer can be worked on with no boat present. The
         # cursor is separate from `waypoint_index` because the two count
@@ -856,9 +858,20 @@ class Sim:
                 "for_status": self.status,
                 "link": True,
                 "acks": int(now),
-                # Commanded, never measured - see `self.servos`.
+            },
+            # The second lighting board - the forward strips and the two cover
+            # servos, on their own ESP32 over USB since 2026-08-13. A separate
+            # block because it is a separate link on the real vessel; here it is
+            # simply always up.
+            "headlights": {
+                "link": True,
+                "verified": True,
+                "board": "LIGMAX-HEADLIGHTS 1 front=8 servos=2 (simulated)",
+                # Commanded, never measured - see `self.servos` / `self.front`.
                 "servo_left_deg": self.servos["left"],
                 "servo_right_deg": self.servos["right"],
+                "front_left": self.front["left"],
+                "front_right": self.front["right"],
             },
             "gps": {
                 "fix": "RTK_FIXED" if now % 90 > 12 else "3D",
@@ -1067,14 +1080,23 @@ class Sim:
             # The server has already refused anything outside each cover's travel,
             # so this only has to echo. Worth noting what is NOT modelled: on the
             # boat the angle is stepped 2° every 15 ms and re-asserted every
-            # second, so a real cover takes about a second to arrive and a real
-            # ESP32 reboot is invisible. Here it teleports.
+            # second, so a real cover takes about a second to arrive - and opening
+            # the board's USB port resets it, which is invisible from here. Here
+            # it teleports and nothing ever reboots.
             try:
                 for side in ("left", "right"):
                     self.servos[side] = int(round(float(args[side])))
             except (KeyError, TypeError, ValueError):
                 return "failed", "set_lights_servos wants a left and a right angle"
             return "acked", f"left {self.servos['left']} deg, right {self.servos['right']} deg"
+        if name == "set_headlights":
+            # Normalised by the server to bare upper-case RRGGBB, so this echoes.
+            try:
+                for side in ("left", "right"):
+                    self.front[side] = str(args[side]).strip().lstrip("#").upper()
+            except KeyError:
+                return "failed", "set_headlights wants a left and a right colour"
+            return "acked", f"left #{self.front['left']}, right #{self.front['right']}"
         if name == "raw":
             # Two debugging hooks, and **no longer reachable from the dashboard**:
             # `raw` was removed from server.py's COMMAND_SPECS on 2026-08-10 (it
